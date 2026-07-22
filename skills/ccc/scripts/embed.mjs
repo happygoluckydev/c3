@@ -19,6 +19,14 @@ const CONFIG = path.join(DATA_DIR, 'config.json');
 // config.json が無い場合の既定値 = 従来挙動(本文索引あり・ベクトルなし)
 const DEFAULTS = { fulltext: true, vectors: { provider: 'none' } };
 
+// 書き込み→リネームにすることで、書き込み中のクラッシュで catalog.jsonl / vectors.* が
+// 壊れた状態のまま次回の search.mjs に読まれることを防ぐ(Codex版 c2 からの逆輸入)
+export function writeAtomic(file, data) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, file);
+}
+
 // YAML フロントマターの簡易パーサ(name/description のみ。依存を増やさないため本格パースはしない)。
 // fmLen: フロントマター部の文字数(prune の常駐税推計用)。body: 本文(検索語彙用)。
 // build-index と prune で別実装が育ち始めたため一本化した
@@ -33,9 +41,22 @@ export function parseFrontmatter(txt) {
     return out;
 }
 
+// ファイルを読んで JSON.parse するだけの使い捨て try/catch が loadConfig 以外にも
+// (readVectors, search.mjs の isStale/トレース用meta読込に)独立に生えていて、
+// 「壊れている場合は警告する」という方針が loadConfig にしか適用されていなかったため
+// 共有ヘルパーに一本化した(/code-review で発見・修正)。
+// ファイル未作成(ENOENT)は通常運用として無警告。それ以外(壊れたJSON等)は黙って
+// フォールバックし続けると気づきにくいので警告を出す。
+export function readJsonSafe(file) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch (e) {
+        if (e.code !== 'ENOENT') console.error(`ccc: ${file} の内容が不正なため無視します: ${e.message}`);
+        return null;
+    }
+}
+
 export function loadConfig() {
-    try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG, 'utf8')) }; }
-    catch { return DEFAULTS; }
+    return { ...DEFAULTS, ...(readJsonSafe(CONFIG) || {}) };
 }
 
 // --- 埋め込みプロバイダ定義 ---
@@ -106,17 +127,25 @@ export function writeVectors(vecs, meta) {
     const dims = vecs[0] ? vecs[0].length : 0;
     const arr = new Float32Array(vecs.length * dims);
     vecs.forEach((v, i) => arr.set(v, i * dims));
-    fs.writeFileSync(VEC_BIN, Buffer.from(arr.buffer));
-    fs.writeFileSync(VEC_META, JSON.stringify({ ...meta, dims, count: vecs.length }));
+    writeAtomic(VEC_BIN, Buffer.from(arr.buffer));
+    writeAtomic(VEC_META, JSON.stringify({ ...meta, dims, count: vecs.length }));
 }
 
 // expectedCount: カタログ行数。再構築後・再埋め込み前の不整合時に
-// ~15MB の .bin 読込を無駄にしないため、meta だけ先に読んで検証する
+// ~15MB の .bin 読込を無駄にしないため、meta だけ先に読んで検証する。
+// サイズ整合性チェックも同じ理由で fs.statSync(バイト数だけ取得)で先に済ませ、
+// 破損/中途半端な書き込みのときに ~15MB を丸読みしてから捨てることのないようにする
+// (旧実装は readFileSync してからサイズを見ていたため無駄読みが発生していた。/code-review で発見・修正)
 export function readVectors(expectedCount) {
+    const meta = readJsonSafe(VEC_META);
+    if (!meta || !meta.dims || (expectedCount != null && meta.count !== expectedCount)) return null;
+    const expectedBytes = meta.dims * meta.count * Float32Array.BYTES_PER_ELEMENT;
     try {
-        const meta = JSON.parse(fs.readFileSync(VEC_META, 'utf8'));
-        if (!meta.dims || (expectedCount != null && meta.count !== expectedCount)) return null;
+        if (fs.statSync(VEC_BIN).size !== expectedBytes) return null;
         const buf = fs.readFileSync(VEC_BIN);
         return { meta, arr: new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4) };
-    } catch { return null; }
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.error(`ccc: ${VEC_BIN} の読み込みに失敗しました: ${e.message}`);
+        return null;
+    }
 }

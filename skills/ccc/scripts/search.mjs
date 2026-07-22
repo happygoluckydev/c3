@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CATALOG, META, loadConfig, resolveProvider, embedTexts, readVectors } from './embed.mjs';
+import { CATALOG, META, loadConfig, resolveProvider, embedTexts, readVectors, readJsonSafe } from './embed.mjs';
 
 const BUILD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'build-index.mjs');
 
@@ -55,9 +55,9 @@ if (!fs.existsSync(CATALOG)) {
     spawn(process.execPath, [BUILD], { detached: true, stdio: 'ignore' }).unref();
 }
 function isStale() {
-    try {
-        return Date.now() - Date.parse(JSON.parse(fs.readFileSync(META, 'utf8')).builtAt) > 7 * 24 * 60 * 60 * 1000;
-    } catch { return true; }
+    const meta = readJsonSafe(META);
+    if (!meta) return true;
+    return Date.now() - Date.parse(meta.builtAt) > 7 * 24 * 60 * 60 * 1000;
 }
 
 const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -75,7 +75,19 @@ if (getNames) {
     process.exit(0);
 }
 
-const tokenize = (s) => (String(s).toLowerCase().match(/[a-z0-9]+/g) || []);
+// ありふれた英単語を除外して IDF/matches のノイズを減らす。文字種も +.#/- まで許容し、
+// "c++" "asp.net" "ci/cd" のような固有表記がトークン化で壊れないようにする
+// (Codex版 c2 からの逆輸入)。
+// 注意点2つ(/code-review で発見・修正):
+//  - 単語長フィルタ(旧: length > 1)は "r" のような1文字の正当なキーワードまで
+//    落としてしまうため廃止。ノイズ除去は STOP_WORDS のみに任せる。
+//  - 文字種を広げた副作用で文末の句点が単語に融着する("Stripe." など)。
+//    クエリ側は句点無しで来ることが多く、同じ語が文書側とクエリ側で別トークンになり
+//    再現率が落ちるため、末尾のピリオドだけ剥がす(先頭は正規表現で英数字確定なので空文字列化しない)。
+const STOP_WORDS = new Set(['a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'in', 'into', 'is', 'it', 'of', 'on', 'or', 'the', 'to', 'with']);
+const tokenize = (s) => (String(s).toLowerCase().match(/[a-z0-9][a-z0-9+.#/-]*/g) || [])
+    .map((t) => t.replace(/\.+$/, ''))
+    .filter((t) => !STOP_WORDS.has(t));
 // キーワード由来と原文由来を分けて持つ(検索には合成、トレースには内訳を出す)
 const kwTokens = [...new Set(tokenize(allQuery))];
 const taskTokens = [...new Set(tokenize(taskText || ''))].filter((t) => !kwTokens.includes(t));
@@ -107,16 +119,19 @@ for (const f of fields) {
 const N = docs.length;
 const idf = (t) => Math.log(1 + N / (1 + (df.get(t) || 0)));
 
-// フィールド重み: 名前ヒット > タグ > 説明文 > 本文。tf は短文なので 0/1 で扱う
+// フィールド重み: 名前ヒット > タグ > 説明文 > 本文。tf は短文なので 0/1 で扱う。
+// matches: どのトークンがどのフィールドで当たったかを記録し、出力の matched_fields 列で
+// 見せる(スコアを鵜呑みにせず根拠を追えるようにする透明性策。Codex版 c2 からの逆輸入)
 let scored = docs.map((d, i) => {
     let score = 0;
+    const matches = [];
     for (const t of qTokens) {
-        if (fields[i].name.has(t)) score += 3 * idf(t);
-        else if (fields[i].tags.has(t)) score += 2 * idf(t);
-        else if (fields[i].desc.has(t)) score += idf(t);
-        else if (fields[i].body.has(t)) score += 0.5 * idf(t);
+        if (fields[i].name.has(t)) { score += 3 * idf(t); matches.push(`${t}:name`); }
+        else if (fields[i].tags.has(t)) { score += 2 * idf(t); matches.push(`${t}:tag`); }
+        else if (fields[i].desc.has(t)) { score += idf(t); matches.push(`${t}:description`); }
+        else if (fields[i].body.has(t)) { score += 0.5 * idf(t); matches.push(`${t}:body`); }
     }
-    return { score, d };
+    return { score, d, matches };
 }).filter((r) => r.score > 0);
 scored.sort((a, b) => b.score - a.score);
 
@@ -134,6 +149,10 @@ if (vec) {
         // モデルが生成したキーワードの良し悪しに検索品質が左右されない
         const [q] = await embedTexts([taskText || allQuery], prov);
         const { dims } = vec.meta;
+        // 埋め込み次元がベクトルファイルと食い違う場合(プロバイダ/モデル変更後の再構築漏れ等)は
+        // 無意味な内積を計算せず、ここで検出して lexical フォールバックに倒す
+        // (Codex版 c2 からの逆輸入)
+        if (q.length !== dims) throw new Error(`stored vectors have ${dims} dims but ${prov.name}/${prov.model} produced ${q.length}; rebuild the catalog`);
         const sims = new Array(docs.length);
         for (let i = 0; i < docs.length; i++) {
             let s = 0;
@@ -142,13 +161,19 @@ if (vec) {
             sims[i] = { i, s };
         }
         sims.sort((a, b) => b.s - a.s);
-        // RRF: score = Σ 1/(60+順位)。60 は RRF の標準定数
+        // matches のルックアップは融合前の scored 全体(上位100件に絞る前)から作る。
+        // fused の上位100件だけから作ると、語彙スコア101位以下だがベクトル側でも拾われた
+        // 文書の matches が空に落ちてしまう(/code-review で発見・修正)。
+        const matchesByDoc = new Map(scored.map((r) => [r.d, r.matches]));
+        // RRF: score = Σ 1/(60+順位)。60 は RRF の標準定数。
+        // fused はスコアのみを持つ Map<Doc, number> にとどめ、matches は上の matchesByDoc から
+        // 融合後にまとめて引く(行オブジェクトを都度 spread してコピーする必要がない)
         const fused = new Map();
         scored.slice(0, 100).forEach((r, idx) => fused.set(r.d, 1 / (60 + idx)));
         sims.slice(0, 100).forEach(({ i }, idx) => {
             fused.set(docs[i], (fused.get(docs[i]) || 0) + 1 / (60 + idx));
         });
-        scored = [...fused.entries()].map(([d, score]) => ({ score, d }));
+        scored = [...fused.entries()].map(([d, score]) => ({ score, d, matches: matchesByDoc.get(d) || [] }));
         scored.sort((a, b) => b.score - a.score);
         searchMode += ` + vector RRF(${vec.meta.provider}/${vec.meta.model})`;
     } catch (e) { console.error(`vector search failed, lexical only: ${e.message}`); }
@@ -166,26 +191,27 @@ const CAPS = { agent: 5, plugin: 5, skill: 6, mcp: 5 };
 const byKind = new Map();
 for (const r of scored) {
     if (!byKind.has(r.d.kind)) byKind.set(r.d.kind, []);
-    byKind.get(r.d.kind).push(r.d);
+    byKind.get(r.d.kind).push(r);
 }
 // 表示順: 既知種別の固定順 → データにだけ存在する新種別
 const kinds = [...new Set([...Object.keys(CAPS), ...byKind.keys()])];
 
 let builtAt = '不明';
 let totalStr = '';
-try {
-    const meta = JSON.parse(fs.readFileSync(META, 'utf8'));
-    builtAt = meta.builtAt;
-    totalStr = ` ${meta.total}件(` + Object.entries(meta.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
-} catch { /* meta 欠損でも検索自体は続行 */ }
+const metaForTrace = readJsonSafe(META);
+if (metaForTrace) {
+    builtAt = metaForTrace.builtAt;
+    totalStr = ` ${metaForTrace.total}件(` + Object.entries(metaForTrace.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
+}
 console.log(`# catalog: ${builtAt} 構築,${totalStr}`);
 console.log(`# mode: ${searchMode}`);
 console.log(`# query: keywords[${kwTokens.join(' ')}]` + (taskTokens.length ? ` + 原文由来[${taskTokens.join(' ')}]` : ' (原文由来の追加トークンなし)'));
 console.log(`# hits: ${kinds.map((k) => `${k} ${(byKind.get(k) || []).length}`).join(' / ')} → 表示 ${kinds.map((k) => `${k} ${Math.min(CAPS[k] ?? 5, (byKind.get(k) || []).length)}`).join(' / ')}`);
-console.log('kind\tname\tsource\tdescription');
+console.log('kind\tname\tsource\tmatched_fields\tdescription');
 for (const kind of kinds) {
-    for (const d of (byKind.get(kind) || []).slice(0, CAPS[kind] ?? 5)) {
+    for (const r of (byKind.get(kind) || []).slice(0, CAPS[kind] ?? 5)) {
+        const d = r.d;
         const desc = (d.description || '').replace(/[\t\n]/g, ' ').slice(0, 90);
-        console.log(`${d.kind}\t${d.name}\t${d.source}\t${desc}`);
+        console.log(`${d.kind}\t${d.name}\t${d.source}\t${(r.matches || []).join(',')}\t${desc}`);
     }
 }

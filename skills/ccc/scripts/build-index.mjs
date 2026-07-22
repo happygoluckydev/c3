@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { DATA_DIR, CATALOG, META, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors } from './embed.mjs';
+import { DATA_DIR, CATALOG, META, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors, writeAtomic } from './embed.mjs';
 
 // インストール時オプション(install.sh --no-fulltext / --vectors <provider>)は config.json 経由で効く
 const cfg = loadConfig();
@@ -24,12 +24,32 @@ const fetchText = (url) => fetchOk(url).then((r) => r.text());
 // 本文(検索語彙用)は先頭4000字で打ち切り:
 // カタログ肥大を防ぎつつ、冒頭に重要語が集まる md 文書では再現率への影響が小さい
 const clipBody = (body) => body.slice(0, 4000);
-const SAFE_CATALOG_PATH = /^[A-Za-z0-9][A-Za-z0-9_-]*(\/[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
+// セグメントの先頭は英数字(パストラバーサル対策で "." "-" 単独始まりを排除)、
+// 以降は英数字/アンダースコア/ハイフン/ドットを許容する(バージョン付きパス
+// "tools/v1.2-migrate" のようなドット入りの正当な path を弾いていたため緩和。
+// /code-review で発見・修正)
+const SAFE_CATALOG_PATH = /^[A-Za-z0-9][A-Za-z0-9_.-]*(\/[A-Za-z0-9][A-Za-z0-9_.-]*)*$/;
 
 function safeCatalogPath(value, source) {
     const s = String(value || '').trim();
     if (!SAFE_CATALOG_PATH.test(s)) {
         errors.push(`${source}: skipped unsafe path ${JSON.stringify(s).slice(0, 120)}`);
+        return null;
+    }
+    return s;
+}
+
+// aitmpl.com の path 用の SAFE_CATALOG_PATH は許可制(allowlist)で URL やパッケージ名には
+// 厳しすぎる。install: 文字列に外部データを埋め込む他のソース(プラグイン名・README中の
+// URL・MCPレジストリのURL/パッケージID)向けに、シェルメタ文字/制御文字だけを拒否する
+// denylist 版を用意する(safeCatalogPath は aitmpl 専用のまま残す。
+// /code-review で発見: このガードが aitmpl.com にしか適用されていなかった)
+const UNSAFE_INSTALL_CHARS = /[;&|`$()<>\n\r"'\\]/;
+
+function safeForInstallString(value, source) {
+    const s = String(value || '').trim();
+    if (!s || UNSAFE_INSTALL_CHARS.test(s)) {
+        errors.push(`${source}: skipped unsafe value ${JSON.stringify(s).slice(0, 120)}`);
         return null;
     }
     return s;
@@ -85,14 +105,22 @@ function indexInstalledSkills() {
 // marketplace.json 1ファイルで全プラグインの説明が取れるので低コスト
 async function indexWshobson() {
     const j = await fetchJson('https://raw.githubusercontent.com/wshobson/agents/main/.claude-plugin/marketplace.json');
-    return (j.plugins || []).map((p) => ({
-        kind: 'plugin',
-        name: p.name,
-        description: p.description || '',
-        source: 'wshobson/agents',
-        tags: [p.category].filter(Boolean),
-        install: `/plugin marketplace add wshobson/agents してから /plugin install ${p.name}@claude-code-workflows`,
-    }));
+    const out = [];
+    for (const p of j.plugins || []) {
+        // p.name は install: 文字列にそのまま埋め込むため、コピペ実行可能な形になる前に検証する
+        // (/code-review で発見: このガードが aitmpl.com にしか適用されていなかった)
+        const name = safeForInstallString(p.name, 'wshobson/agents');
+        if (!name) continue;
+        out.push({
+            kind: 'plugin',
+            name,
+            description: p.description || '',
+            source: 'wshobson/agents',
+            tags: [p.category].filter(Boolean),
+            install: `/plugin marketplace add wshobson/agents してから /plugin install ${name}@claude-code-workflows`,
+        });
+    }
+    return out;
 }
 
 // --- ソース: anthropics/skills 公式スキル集 ---
@@ -132,12 +160,16 @@ async function indexVoltAgent() {
     const re = /^\s*[-*]\s*\[\*{0,2}([^\]*]+)\*{0,2}\]\(([^)]+\.md)\)\s*[-–—:]\s*(.+)$/gm;
     let m;
     while ((m = re.exec(txt)) !== null) {
+        // m[2] は正規表現 [^)]+ で拾うため空白・バッククォート・$()等も一致し得る。
+        // install: に埋め込む前に検証する(/code-review で発見・修正)
+        const relPath = safeForInstallString(m[2], 'VoltAgent/awesome-claude-code-subagents');
+        if (!relPath) continue;
         out.push({
             kind: 'agent',
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-claude-code-subagents',
-            install: `https://raw.githubusercontent.com/VoltAgent/awesome-claude-code-subagents/main/${m[2]} を確認の上 ~/.claude/agents/ に保存`,
+            install: `https://raw.githubusercontent.com/VoltAgent/awesome-claude-code-subagents/main/${relPath} を確認の上 ~/.claude/agents/ に保存`,
         });
     }
     return out;
@@ -151,12 +183,15 @@ async function indexVoltAgentSkills() {
     const re = /^\s*-\s*\*\*\[([^\]]+)\]\(([^)]+)\)\*\*\s*[-–—]\s*(.+)$/gm;
     let m;
     while ((m = re.exec(txt)) !== null) {
+        // m[2] は正規表現 [^)]+ で拾う URL。install: に埋め込む前に検証する(/code-review で発見・修正)
+        const url = safeForInstallString(m[2], 'VoltAgent/awesome-agent-skills');
+        if (!url) continue;
         out.push({
             kind: 'skill',
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-agent-skills',
-            install: `${m[2]} を確認の上、SKILL.md を ~/.claude/skills/<名前>/ に保存`,
+            install: `${url} を確認の上、SKILL.md を ~/.claude/skills/<名前>/ に保存`,
         });
     }
     return out;
@@ -200,15 +235,18 @@ async function indexMcpRegistry() {
             const s = row.server || row;
             const meta = (row._meta || {})['io.modelcontextprotocol.registry/official'] || {};
             if (meta.status && meta.status !== 'active') continue;
-            // 導入コマンドはトランスポート種別から組み立てる(remote 優先、なければ npm パッケージ)
+            // 導入コマンドはトランスポート種別から組み立てる(remote 優先、なければ npm パッケージ)。
+            // remote.url / パッケージIDは外部データなので install: に埋め込む前に検証し、
+            // 不正な場合は安全な汎用文言にフォールバックする(/code-review で発見・修正)
             const remote = (s.remotes || [])[0];
             const pkg = (s.packages || [])[0];
             let install = 'レジストリ参照: https://registry.modelcontextprotocol.io';
-            if (remote) {
-                install = `claude mcp add --transport ${remote.type === 'sse' ? 'sse' : 'http'} <任意の名前> ${remote.url}`;
-            } else if (pkg) {
-                const id = pkg.identifier || pkg.name || '';
-                if (id) install = `claude mcp add <任意の名前> -- npx -y ${id}`;
+            const remoteUrl = remote && safeForInstallString(remote.url, 'mcp-registry');
+            const pkgId = pkg && safeForInstallString(pkg.identifier || pkg.name || '', 'mcp-registry');
+            if (remoteUrl) {
+                install = `claude mcp add --transport ${remote.type === 'sse' ? 'sse' : 'http'} <任意の名前> ${remoteUrl}`;
+            } else if (pkgId) {
+                install = `claude mcp add <任意の名前> -- npx -y ${pkgId}`;
             }
             byName.set(s.name, {
                 kind: 'mcp',
@@ -257,7 +295,9 @@ async function indexMcpRegistry() {
     // 軽量インストール(--no-fulltext): 本文語彙を落としてカタログを約半分にする
     if (cfg.fulltext === false) for (const e of unique) delete e.fulltext;
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(CATALOG, unique.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    // 書き込み中のクラッシュで catalog.jsonl が壊れないよう一時ファイル→rename する
+    // (Codex版 c2 からの逆輸入。meta.json は小さく壊れても re-run で自己修復するため対象外)
+    writeAtomic(CATALOG, unique.map((e) => JSON.stringify(e)).join('\n') + '\n');
 
     // ベクトル構築(--vectors <provider>): 名前+タグ+説明文を埋め込む。
     // 本文全文は埋め込まない(ルーティング用途では説明文で十分、コストも1/10以下)

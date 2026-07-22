@@ -77,7 +77,16 @@ console.log(JSON.stringify({
 
 if (apply && unused.length > 0) {
     fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-    for (const a of unused) fs.renameSync(path.join(AGENTS_DIR, a.file), path.join(ARCHIVE_DIR, a.file));
-    console.log(`${unused.length} 体を ${ARCHIVE_DIR} へ退避しました(復元は mv で戻すだけ)。`);
+    let archived = 0;
+    for (const a of unused) {
+        const dest = path.join(ARCHIVE_DIR, a.file);
+        // 退避先に同名ファイルが既にある場合(過去に別内容で退避済み等)は上書きせず
+        // タイムスタンプを付けて衝突を避ける(Codex版 c2 からの逆輸入)
+        try {
+            fs.renameSync(path.join(AGENTS_DIR, a.file), fs.existsSync(dest) ? `${dest}-${Date.now()}` : dest);
+            archived++;
+        } catch (e) { console.error(`${a.file} の退避に失敗しました: ${e.message}`); }
+    }
+    console.log(`${archived} 体を ${ARCHIVE_DIR} へ退避しました(復元は mv で戻すだけ)。`);
     console.log('カタログの installed 情報を更新するため build-index.mjs を再実行してください。');
 }
