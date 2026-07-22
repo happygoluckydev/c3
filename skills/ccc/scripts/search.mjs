@@ -55,7 +55,11 @@ const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).map((l
 if (getNames) {
     const wanted = new Set(getNames.split(',').map((s) => s.trim().toLowerCase()));
     for (const d of docs) {
-        if (wanted.has(String(d.name).toLowerCase())) console.log(JSON.stringify(d));
+        // fulltext は検索語彙専用。出力するとトークン節約が台無しになるため必ず落とす
+        if (wanted.has(String(d.name).toLowerCase())) {
+            const { fulltext, ...rest } = d;
+            console.log(JSON.stringify(rest));
+        }
     }
     process.exit(0);
 }
@@ -74,20 +78,24 @@ const fields = docs.map((d) => ({
     name: new Set(tokenize(d.name)),
     desc: new Set(tokenize(d.description)),
     tags: new Set(tokenize((d.tags || []).join(' '))),
+    // fulltext: SKILL.md やエージェント定義の本文(あるソースのみ)。
+    // 説明文に現れない語彙(具体的なAPI名・ファイル形式等)での取りこぼしを防ぐ
+    body: new Set(tokenize(d.fulltext || '')),
 }));
 for (const f of fields) {
-    for (const t of new Set([...f.name, ...f.desc, ...f.tags])) df.set(t, (df.get(t) || 0) + 1);
+    for (const t of new Set([...f.name, ...f.desc, ...f.tags, ...f.body])) df.set(t, (df.get(t) || 0) + 1);
 }
 const N = docs.length;
 const idf = (t) => Math.log(1 + N / (1 + (df.get(t) || 0)));
 
-// フィールド重み: 名前ヒット > タグ > 説明文。tf は短文なので 0/1 で扱う
+// フィールド重み: 名前ヒット > タグ > 説明文 > 本文。tf は短文なので 0/1 で扱う
 const scored = docs.map((d, i) => {
     let score = 0;
     for (const t of qTokens) {
         if (fields[i].name.has(t)) score += 3 * idf(t);
         else if (fields[i].tags.has(t)) score += 2 * idf(t);
         else if (fields[i].desc.has(t)) score += idf(t);
+        else if (fields[i].body.has(t)) score += 0.5 * idf(t);
     }
     return { score, d };
 }).filter((r) => r.score > 0);

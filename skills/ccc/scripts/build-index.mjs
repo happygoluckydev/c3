@@ -35,6 +35,13 @@ function parseFrontmatter(txt) {
     return out;
 }
 
+// 本文(フロントマター以降)を検索語彙用に切り出す。
+// 説明文だけでは語彙が足りず取りこぼす問題への対策(2026-07-22)。
+// 4000字で打ち切り: カタログ肥大を防ぎつつ、冒頭に重要語が集まる md 文書では再現率への影響が小さい
+function extractBody(txt) {
+    return txt.replace(/^---\r?\n[\s\S]*?\r?\n---/, '').trim().slice(0, 4000);
+}
+
 // --- ソース1: 導入済みユーザーエージェント (~/.claude/agents) ---
 // 「既に持っているもの」を最優先で提案するために必ずカタログに含める
 function indexInstalledAgents() {
@@ -43,13 +50,15 @@ function indexInstalledAgents() {
     for (const f of fs.readdirSync(dir)) {
         if (!f.endsWith('.md')) continue;
         try {
-            const fm = parseFrontmatter(fs.readFileSync(path.join(dir, f), 'utf8'));
+            const txt = fs.readFileSync(path.join(dir, f), 'utf8');
+            const fm = parseFrontmatter(txt);
             entries.push({
                 kind: 'agent',
                 name: fm.name || f.replace(/\.md$/, ''),
                 description: fm.description || '',
                 source: 'installed',
                 install: '導入済み (~/.claude/agents)',
+                fulltext: extractBody(txt),
             });
         } catch (e) { errors.push(`installed:${f}: ${e.message}`); }
     }
@@ -64,13 +73,15 @@ function indexInstalledSkills() {
         const skillMd = path.join(dir, d, 'SKILL.md');
         if (!fs.existsSync(skillMd)) continue;
         try {
-            const fm = parseFrontmatter(fs.readFileSync(skillMd, 'utf8'));
+            const txt = fs.readFileSync(skillMd, 'utf8');
+            const fm = parseFrontmatter(txt);
             entries.push({
                 kind: 'skill',
                 name: fm.name || d,
                 description: fm.description || '',
                 source: 'installed',
                 install: '導入済み (~/.claude/skills)',
+                fulltext: extractBody(txt),
             });
         } catch (e) { errors.push(`installed-skill:${d}: ${e.message}`); }
     }
@@ -96,6 +107,7 @@ async function indexAnthropicSkills() {
                 source: 'anthropics/skills',
                 tags: ['official'],
                 install: `https://github.com/anthropics/skills/tree/main/skills/${slug} を ~/.claude/skills/${slug}/ に保存`,
+                fulltext: extractBody(txt),
             });
         } catch (e) { errors.push(`anthropics-skills:${p}: ${e.message}`); }
     }
@@ -131,7 +143,8 @@ async function indexAitmplSkills() {
             name: s.path,
             description: (s.description || '').slice(0, 300),
             source: 'aitmpl.com',
-            tags: [s.category].filter(Boolean),
+            // keywords はカタログ側が付けた検索語(例: terraform, iac)。タグに合流させ検索再現率を上げる
+            tags: [s.category, ...(Array.isArray(s.keywords) ? s.keywords : [])].filter(Boolean).slice(0, 12),
             install: `npx claude-code-templates@latest --skill="${s.path}" --yes`,
         });
     }
