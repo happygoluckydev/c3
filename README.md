@@ -20,6 +20,76 @@ Asking an LLM to web-research the plugin/agent/MCP ecosystem on every request bu
 
 No embedding API, no npm dependencies — Node.js standard library only.
 
+## How it works
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph sources["Catalog sources — crawled weekly, HTTP only, no LLM"]
+        A1["~/.claude/agents<br/>installed agents"]
+        A2["~/.claude/skills<br/>installed skills"]
+        B1["wshobson/agents<br/>marketplace.json"]
+        B2["VoltAgent lists<br/>subagents + skills"]
+        B3["anthropics/skills<br/>official skills"]
+        B4["aitmpl.com<br/>components.json"]
+        B5["MCP Registry<br/>v0/servers API"]
+    end
+
+    CRON["weekly cron /<br/>Task Scheduler"] --> BUILD
+    BUILD["build-index.mjs<br/>parse + dedupe, official first"]
+    EMB["embed.mjs — optional<br/>Gemini / Voyage / OpenAI via REST"]
+
+    subgraph store["~/.claude/ccc/"]
+        CFG["config.json<br/>fulltext / vectors mode"]
+        CAT["catalog.jsonl<br/>~5,000 entries"]
+        VEC["vectors.bin — optional<br/>L2-normalized float32"]
+        META["meta.json<br/>builtAt, counts"]
+    end
+
+    SEARCH["search.mjs<br/>IDF lexical + optional RRF hybrid"]
+    CLAUDE["Claude Code<br/>/ccc or /c3 skill"]
+
+    sources --> BUILD
+    CFG -.-> BUILD
+    CFG -.-> SEARCH
+    BUILD --> CAT
+    BUILD --> META
+    BUILD --> EMB --> VEC
+    CAT --> SEARCH
+    VEC --> SEARCH
+    CLAUDE -->|"--all / --get"| SEARCH
+    SEARCH --> CLAUDE
+```
+
+### Query flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Claude (/ccc skill)
+    participant S as search.mjs
+    participant B as build-index.mjs
+
+    U->>C: /ccc "task description"
+    C->>C: extract 4–8 English keywords
+    C->>S: node search.mjs --all "keywords"
+    S->>S: freshness check (meta.json)
+    alt catalog missing or older than 7 days
+        S->>B: rebuild (HTTP only, no LLM)
+        B-->>S: fresh catalog
+    end
+    S->>S: IDF-weighted lexical scoring
+    opt vectors enabled and API key set
+        S->>S: embed query, cosine over vectors.bin, RRF fusion
+    end
+    S-->>C: compact TSV, ≤21 rows, no install commands
+    C->>C: pick 3–5 finalists by priority policy<br/>(reuse > plugin > skill > MCP > standalone agent)
+    C->>S: node search.mjs --get "finalists"
+    S-->>C: full JSON with install commands
+    C-->>U: proposal table + rationale + security notes
+```
+
 ## Catalog sources
 
 - Your already-installed agents and skills (`~/.claude/agents/`, `~/.claude/skills/`) — reuse comes first
