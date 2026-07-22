@@ -44,6 +44,11 @@ function opt(name) {
 }
 
 const allQuery = opt('all');
+// --task: ユーザーのタスク原文(日本語可)。呼び出しモデルのキーワード生成品質に
+// 依存しないよう、原文からも機械的に語彙を取り(ASCII技術語)、ベクトル検索の
+// クエリには原文を優先して使う(埋め込みは多言語対応のため)。
+// モデル差(haiku/fable等)で提示候補が揺れる問題への対策(2026-07-22)
+const taskText = opt('task');
 const getNames = opt('get');
 const kindFilter = opt('kind');
 const top = parseInt(opt('top') || '10', 10);
@@ -66,10 +71,10 @@ if (getNames) {
 }
 
 const tokenize = (s) => (String(s).toLowerCase().match(/[a-z0-9]+/g) || []);
-const query = allQuery || legacyQuery || '';
+const query = [allQuery || legacyQuery, taskText].filter(Boolean).join(' ');
 const qTokens = [...new Set(tokenize(query))];
 if (qTokens.length === 0) {
-    console.error('使い方: --all "<keywords>" / --get "<names>" / "<keywords>" --kind <k>');
+    console.error('使い方: --all "<keywords>" [--task "<原文>"] / --get "<names>" / "<keywords>" --kind <k>');
     process.exit(1);
 }
 
@@ -110,7 +115,9 @@ const prov = resolveProvider(cfg);
 const vec = (prov && !prov.missingKey) ? readVectors() : null;
 if (vec && vec.meta.count === docs.length && vec.meta.dims > 0) {
     try {
-        const [q] = await embedTexts([query], prov);
+        // 原文があればそれを埋め込む: 多言語埋め込みは日本語原文を直接理解するため、
+        // モデルが生成したキーワードの良し悪しに検索品質が左右されない
+        const [q] = await embedTexts([taskText || query], prov);
         const { dims } = vec.meta;
         const sims = new Array(docs.length);
         for (let i = 0; i < docs.length; i++) {
