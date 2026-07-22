@@ -39,6 +39,19 @@ sh install.sh        # Windows PowerShell: ./install.ps1
 
 Then restart your Claude Code session and run `/ccc <task>` or `/c3 <task>`.
 
+## Keeping the catalog fresh
+
+The skill already rebuilds the catalog lazily when it is older than 7 days.
+To refresh it on a fixed schedule instead (no LLM tokens involved either way):
+
+```sh
+sh setup-schedule.sh      # macOS/Linux: weekly cron job (Mon 09:00)
+```
+
+```powershell
+./setup-schedule.ps1      # Windows: weekly scheduled task (Mon 09:00)
+```
+
 ## Recommendation policy
 
 Proposals follow a strict priority order:
