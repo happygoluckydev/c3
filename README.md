@@ -10,6 +10,10 @@
 
 → Returns a prioritized proposal table (what to reuse, what to install, what *not* to install) with ready-to-run install commands.
 
+## Demo
+
+![c3 demo: running /ccc and getting a prioritized reuse-first recommendation](./assets/demo-en.gif)
+
 ## Why
 
 c3 was born from a habit worth automating: every time you're about to hand-roll a subagent, a prompt, or an integration, someone in the ecosystem has probably already built — and debugged — a better one. Reuse beats rebuild, which is why c3's recommendation policy literally starts with *"no addition needed — reuse what you already have."* The catalog even indexes your own `~/.claude/agents` and `~/.claude/skills` first.
@@ -109,6 +113,8 @@ sequenceDiagram
 
 Source counts above are approximate (as noted in the indexer). Add sources by editing `skills/ccc/scripts/build-index.mjs` (one function per source).
 
+Catalog builds a local search index on your machine. In default fulltext mode, that local `catalog.jsonl` can include names, tags, descriptions, and clipped body text from installed agents/skills and selected public skill sources (up to 4,000 chars per entry); `--no-fulltext` skips body indexing. That does **not** re-license those upstream projects — each plugin, agent, skill, or MCP server remains under its own license and terms. c3 points you at candidates; you still follow each project's license when you install or reuse it. Public endpoints and upstream ToS can change; the indexer may then skip or drop a source.
+
 ## Install
 
 **Prerequisites**: [Node.js](https://nodejs.org/) (for catalog build/search) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
@@ -130,6 +136,15 @@ This copies the skill to `~/.claude/skills/ccc/` and the `/c3` command alias to 
 | `--vectors gemini\|voyage\|openai` | `-Vectors gemini` | Hybrid search: lexical + embedding ranks fused with RRF. Needs `GEMINI_API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`. Embedding cost ≈ $0.01 per full rebuild (5k short texts); queries are one embed call each. |
 
 Options are stored in `~/.claude/ccc/config.json` — edit it (or re-run the installer) to switch modes. If the vector provider's API key is missing, search falls back to lexical mode.
+
+#### Optional `--vectors`: what leaves your machine
+
+Default install is **local-only** (lexical / fulltext). With `--vectors`, the chosen provider receives:
+
+- **Catalog rebuild**: names, tags, and descriptions for embedding (not fulltext bodies)
+- **Each `/ccc` query**: the search query string (keywords / task text) for one embed call
+
+API keys stay in your environment variables. Review the provider's terms and data policies before enabling. For confidential task text, keep the default lexical mode (no external embed calls).
 
 ## Keeping the catalog fresh
 
@@ -168,10 +183,16 @@ node ~/.claude/skills/ccc/scripts/prune.mjs --apply  # archive unused to ~/.clau
 
 ## 日本語
 
+![c3 の操作イメージ: /ccc を実行して優先順位付きの提案を得る](./assets/demo-ja.gif)
+
 **「車輪の再発明をしたくない」から生まれたツールです。** 自作のエージェントやスキルを書き始める前に、エコシステムに既にある数千のプラグイン・エージェント・スキル・MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（手元の資産の再利用）→ プラグイン → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案する Claude Code スキルです。
 
 クロールは HTTP のみ（LLM 不使用）。カタログが無い初回は同期構築、7 日超で古い場合は手元のカタログで即応答しつつバックグラウンド再構築します。提案時の検索はローカルのみなのでクレジット消費を最小化できます。導入は Node.js がある環境で `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
 
+MIT は **本リポジトリのコード／ドキュメントのみ**に適用されます。カタログが指す第三者のプラグイン・エージェント・スキル・MCP は各プロジェクトのライセンス・利用条件に従ってください。既定のローカル検索では、`catalog.jsonl` に名前・タグ・説明文に加えて agent/skill 本文の一部（最大 4,000 文字）が保存される場合があります。`--vectors` を有効にした場合、外部 Embedding API に送信されるのは名前・タグ・説明文とクエリで、fulltext 本文は送信されません。機密タスクでは既定のローカル検索を推奨します。
+
 ## License
 
-MIT
+[MIT License](./LICENSE) (`SPDX-License-Identifier: MIT`)
+
+The MIT license covers **this repository's code and documentation only**. Catalog entries that c3 discovers or recommends (third-party plugins, agents, skills, MCP servers, and any locally indexed metadata or clipped body text) remain under **their own licenses and terms** — c3 does not re-license them. Install copies the notice into `~/.claude/skills/ccc/LICENSE` with the skill.
