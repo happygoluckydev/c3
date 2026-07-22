@@ -2,8 +2,9 @@
 # c3 installer: copies the skill + /c3 alias into ~/.claude and writes the feature config.
 # Options:
 #   --no-fulltext        lite install: skip document-body indexing (smaller catalog)
-#   --vectors <provider> enable hybrid vector search: gemini | voyage | openai
-#                        (requires GEMINI_API_KEY / VOYAGE_API_KEY / OPENAI_API_KEY env var)
+#   --vectors <provider> enable hybrid vector search (gemini | voyage | openai).
+#                        Provider validity is checked at first catalog build by the runtime
+#                        (single source of truth: PROVIDERS in scripts/embed.mjs).
 set -e
 FULLTEXT=true
 VECTORS=none
@@ -15,7 +16,6 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-case "$VECTORS" in none|gemini|voyage|openai) ;; *) echo "--vectors must be gemini|voyage|openai" >&2; exit 1 ;; esac
 
 DEST="${HOME}/.claude"
 mkdir -p "$DEST/skills" "$DEST/commands" "$DEST/ccc"
@@ -26,6 +26,6 @@ printf '{\n    "fulltext": %s,\n    "vectors": { "provider": "%s" }\n}\n' "$FULL
 echo "Installed /ccc and /c3 (fulltext=$FULLTEXT, vectors=$VECTORS)."
 if [ "$VECTORS" != "none" ]; then
     KEY=$(echo "$VECTORS" | tr '[:lower:]' '[:upper:]')_API_KEY
-    echo "NOTE: set the $KEY environment variable before the first catalog build."
+    echo "NOTE: set the $KEY environment variable (default name) before the first catalog build."
 fi
 echo "Restart your Claude Code session to load the skill."

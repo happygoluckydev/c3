@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
+import { parseFrontmatter } from './embed.mjs';
 
 const HOME = os.homedir();
 const AGENTS_DIR = path.join(HOME, '.claude', 'agents');
@@ -22,23 +23,11 @@ const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const apply = process.argv.includes('--apply');
 
 // --- 導入済みエージェントの一覧(frontmatter の name とファイル名の両方で照合する) ---
-function parseFrontmatter(txt) {
-    const m = txt.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    const out = {};
-    if (!m) return out;
-    for (const line of m[1].split(/\r?\n/)) {
-        const mm = line.match(/^(name|description)\s*:\s*(.*)$/);
-        if (mm) out[mm[1]] = mm[2].trim().replace(/^["']|["']$/g, '');
-    }
-    return { ...out, fmLen: m ? m[0].length : 0 };
-}
-
 const installed = [];
 for (const f of fs.readdirSync(AGENTS_DIR)) {
     if (!f.endsWith('.md')) continue;
-    const txt = fs.readFileSync(path.join(AGENTS_DIR, f), 'utf8');
-    const fm = parseFrontmatter(txt);
-    installed.push({ file: f, name: fm.name || f.replace(/\.md$/, ''), fmLen: fm.fmLen });
+    const fm = parseFrontmatter(fs.readFileSync(path.join(AGENTS_DIR, f), 'utf8'));
+    installed.push({ file: f, base: f.replace(/\.md$/, ''), name: fm.name || f.replace(/\.md$/, ''), fmLen: fm.fmLen });
 }
 
 // --- 全セッション履歴から使用実績を収集 ---
@@ -55,7 +44,11 @@ async function collectUsedNames() {
             else if (e.name.endsWith('.jsonl')) files.push(p);
         }
     })(PROJECTS_DIR);
+    const allUsed = () => installed.every((a) => used.has(a.name) || used.has(a.base));
     for (const file of files) {
+        // 全員の使用が確定したら以降の走査は結果を変えないため打ち切る
+        // (履歴が数百MBあるときの支配的コスト対策)
+        if (allUsed()) break;
         const rl = readline.createInterface({ input: fs.createReadStream(file, 'utf8') });
         for await (const line of rl) {
             for (const m of line.matchAll(/"subagent_type"\s*:\s*"([^"]+)"/g)) used.add(m[1]);
@@ -65,7 +58,7 @@ async function collectUsedNames() {
 }
 
 const used = await collectUsedNames();
-const isUsed = (a) => used.has(a.name) || used.has(a.file.replace(/\.md$/, ''));
+const isUsed = (a) => used.has(a.name) || used.has(a.base);
 const unused = installed.filter((a) => !isUsed(a));
 const usedList = installed.filter(isUsed);
 
