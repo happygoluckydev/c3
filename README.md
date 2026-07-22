@@ -1,6 +1,8 @@
 # c3 — Claude Code Concierge
 
-**/ccc** (or **/c3**) tells you the best combination of Claude Code **plugins, subagents, and MCP servers** for whatever task you describe — using a **local RAG catalog** so that each recommendation costs almost zero tokens.
+> **Don't reinvent the wheel.** The Claude Code ecosystem already ships thousands of plugins, agents, skills, and MCP servers. The hard part isn't building your own — it's knowing what already exists. c3 checks *before* you build.
+
+**/ccc** (or **/c3**) tells you the best combination of Claude Code **plugins, subagents, skills, and MCP servers** for whatever task you describe — using a **local RAG catalog** so that each recommendation costs almost zero tokens.
 
 ```
 /ccc I want to build a Stripe subscription billing page
@@ -10,7 +12,9 @@
 
 ## Why
 
-Asking an LLM to web-research the plugin/agent/MCP ecosystem on every request burns 100k+ tokens per question. c3 splits the work:
+c3 was born from a habit worth automating: every time you're about to hand-roll a subagent, a prompt, or an integration, someone in the ecosystem has probably already built — and debugged — a better one. Reuse beats rebuild, which is why c3's recommendation policy literally starts with *"no addition needed — reuse what you already have."* The catalog even indexes your own `~/.claude/agents` and `~/.claude/skills` first.
+
+But checking the ecosystem by hand (or letting an LLM web-research it) costs real time and 100k+ tokens per question. c3 splits the work:
 
 | Phase | Frequency | Cost |
 |---|---|---|
@@ -148,7 +152,7 @@ Community-made definition files can carry prompt-injection risks — c3 always r
 
 ## 日本語
 
-タスクを伝えると「公式機能 → プラグイン → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案する Claude Code スキルです。クロールは週1回のバッチ（LLM 不使用）、提案時はローカル検索のみなのでクレジット消費を最小化できます。導入は `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
+**「車輪の再発明をしたくない」から生まれたツールです。** 自作のエージェントやスキルを書き始める前に、エコシステムに既にある数千のプラグイン・エージェント・スキル・MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（手元の資産の再利用）→ プラグイン → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案する Claude Code スキルです。クロールは週1回のバッチ（LLM 不使用）、提案時はローカル検索のみなのでクレジット消費を最小化できます。導入は `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
 
 ## License
 
