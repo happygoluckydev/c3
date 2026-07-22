@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 // ccc: カタログ構築バッチ
 // 目的: プラグイン/エージェント/スキル/MCP の情報を一括クロールして catalog.jsonl に保存する。
 // クレジット消費を抑えるため LLM は使わない(HTTP 取得のみ)。週1回程度の実行を想定。

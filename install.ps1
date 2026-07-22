@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # c3 installer: copies the skill + /c3 alias into ~/.claude and writes the feature config.
 # Options:
 #   -NoFulltext          lite install: skip document-body indexing (smaller catalog)
@@ -13,6 +14,8 @@ foreach ($d in 'skills', 'commands', 'ccc') {
     New-Item -ItemType Directory -Force (Join-Path $dest $d) | Out-Null
 }
 Copy-Item -Recurse -Force "skills/ccc" (Join-Path $dest "skills")
+# Keep MIT notice with the installed skill (source of truth: repo-root LICENSE).
+Copy-Item -Force "LICENSE" (Join-Path $dest "skills\ccc\LICENSE")
 Copy-Item -Force "commands/c3.md" (Join-Path $dest "commands")
 $fulltext = if ($NoFulltext) { 'false' } else { 'true' }
 @"

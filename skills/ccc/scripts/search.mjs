@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 // ccc: ローカルカタログ検索(RAG の Retrieval 部分)
 // 埋め込み API を使わず IDF 加重キーワードマッチで代替する。
 // カタログの説明文は短文なので、これで実用上十分な精度が出る(コストゼロが優先)。

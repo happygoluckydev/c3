@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# SPDX-License-Identifier: MIT
 # c3 installer: copies the skill + /c3 alias into ~/.claude and writes the feature config.
 # Options:
 #   --no-fulltext        lite install: skip document-body indexing (smaller catalog)
@@ -20,6 +21,8 @@ done
 DEST="${HOME}/.claude"
 mkdir -p "$DEST/skills" "$DEST/commands" "$DEST/ccc"
 cp -r skills/ccc "$DEST/skills/"
+# Keep MIT notice with the installed skill (source of truth: repo-root LICENSE).
+cp LICENSE "$DEST/skills/ccc/LICENSE"
 cp commands/c3.md "$DEST/commands/"
 printf '{\n    "fulltext": %s,\n    "vectors": { "provider": "%s" }\n}\n' "$FULLTEXT" "$VECTORS" > "$DEST/ccc/config.json"
 

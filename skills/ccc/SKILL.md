@@ -2,6 +2,7 @@
 name: ccc
 description: Claude Code Concierge — タスク内容に最適な Claude Code プラグイン・スキル・エージェント・MCP サーバーの組み合わせをローカルカタログ(RAG)から検索して提案する。使い方 /ccc <やりたいタスク>（/c3 でも可）。Web 調査は原則行わずクレジット消費を最小化する。
 ---
+<!-- SPDX-License-Identifier: MIT -->
 
 # ccc (Claude Code Concierge) — タスクに最適な拡張構成を提案する
 

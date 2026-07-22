@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# SPDX-License-Identifier: MIT
 # Registers a weekly cron job (Mon 09:00) that rebuilds the c3 catalog.
 # The rebuild is HTTP-only (no LLM calls), so it costs nothing but a few seconds of CPU.
 set -e

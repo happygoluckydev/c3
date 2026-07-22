@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Registers a weekly Windows scheduled task (Mon 09:00) that rebuilds the c3 catalog.
 # The rebuild is HTTP-only (no LLM calls), so it costs nothing but a few seconds of CPU.
 $node = (Get-Command node).Source

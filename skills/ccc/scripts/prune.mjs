@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 // ccc: 導入資産の棚卸し(セッション単位のクレジット効率化)
 //
 // 背景: 導入済みエージェントの一覧は毎セッション・毎APIコールのシステムプロンプトに
