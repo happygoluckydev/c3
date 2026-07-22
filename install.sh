@@ -4,7 +4,7 @@
 # Options:
 #   --no-fulltext        lite install: skip document-body indexing (smaller catalog)
 #   --vectors <provider> enable hybrid vector search (gemini | voyage | openai).
-#                        Provider validity is checked at first catalog build by the runtime
+#                        Provider validity is checked by the installer and runtime
 #                        (single source of truth: PROVIDERS in scripts/embed.mjs).
 set -e
 FULLTEXT=true
@@ -12,11 +12,22 @@ VECTORS=none
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-fulltext) FULLTEXT=false ;;
-        --vectors) VECTORS="$2"; shift ;;
+        --vectors)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "--vectors requires a provider: none, gemini, voyage, or openai" >&2
+                exit 1
+            fi
+            VECTORS="$1"
+            ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
 done
+case "$VECTORS" in
+    none|gemini|voyage|openai) ;;
+    *) echo "invalid --vectors provider: $VECTORS (expected none, gemini, voyage, or openai)" >&2; exit 1 ;;
+esac
 
 DEST="${HOME}/.claude"
 mkdir -p "$DEST/skills" "$DEST/commands" "$DEST/ccc"

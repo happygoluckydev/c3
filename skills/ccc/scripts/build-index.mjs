@@ -24,6 +24,16 @@ const fetchText = (url) => fetchOk(url).then((r) => r.text());
 // 本文(検索語彙用)は先頭4000字で打ち切り:
 // カタログ肥大を防ぎつつ、冒頭に重要語が集まる md 文書では再現率への影響が小さい
 const clipBody = (body) => body.slice(0, 4000);
+const SAFE_CATALOG_PATH = /^[A-Za-z0-9][A-Za-z0-9_-]*(\/[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
+
+function safeCatalogPath(value, source) {
+    const s = String(value || '').trim();
+    if (!SAFE_CATALOG_PATH.test(s)) {
+        errors.push(`${source}: skipped unsafe path ${JSON.stringify(s).slice(0, 120)}`);
+        return null;
+    }
+    return s;
+}
 
 // --- ソース: 導入済みユーザーエージェント (~/.claude/agents) ---
 // 「既に持っているもの」を最優先で提案するために必ずカタログに含める
@@ -156,16 +166,22 @@ async function indexVoltAgentSkills() {
 // components.json 1ファイル(約2MB)に 800+ のコミュニティスキルが説明付きで入っている
 async function indexAitmplSkills() {
     const j = await fetchJson('https://raw.githubusercontent.com/davila7/claude-code-templates/main/docs/components.json');
-    return (j.skills || []).filter((s) => s.path).map((s) => ({
-        kind: 'skill',
-        // name はカテゴリ間で重複があるため path (例: security/security-audit) を名前として使う
-        name: s.path,
-        description: (s.description || '').slice(0, 300),
-        source: 'aitmpl.com',
-        // keywords はカタログ側が付けた検索語。タグに合流させ検索再現率を上げる
-        tags: [s.category, ...(Array.isArray(s.keywords) ? s.keywords : [])].filter(Boolean).slice(0, 12),
-        install: `npx claude-code-templates@latest --skill="${s.path}" --yes`,
-    }));
+    const out = [];
+    for (const s of (j.skills || [])) {
+        const skillPath = safeCatalogPath(s.path, 'aitmpl.com');
+        if (!skillPath) continue;
+        out.push({
+            kind: 'skill',
+            // name はカテゴリ間で重複があるため path (例: security/security-audit) を名前として使う
+            name: skillPath,
+            description: (s.description || '').slice(0, 300),
+            source: 'aitmpl.com',
+            // keywords はカタログ側が付けた検索語。タグに合流させ検索再現率を上げる
+            tags: [s.category, ...(Array.isArray(s.keywords) ? s.keywords : [])].filter(Boolean).slice(0, 12),
+            install: `npx claude-code-templates@latest --skill=${skillPath} --yes`,
+        });
+    }
+    return out;
 }
 
 // --- ソース: MCP 公式レジストリ (registry.modelcontextprotocol.io) ---

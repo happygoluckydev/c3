@@ -3,12 +3,18 @@
 # Options:
 #   -NoFulltext          lite install: skip document-body indexing (smaller catalog)
 #   -Vectors <provider>  enable hybrid vector search (gemini | voyage | openai).
-#                        Provider validity is checked at first catalog build by the runtime
+#                        Provider validity is checked by the installer and runtime
 #                        (single source of truth: PROVIDERS in scripts/embed.mjs).
 param(
     [switch]$NoFulltext,
     [string]$Vectors = 'none'
 )
+$Vectors = $Vectors.ToLowerInvariant()
+$allowedVectors = @('none', 'gemini', 'voyage', 'openai')
+if ($allowedVectors -notcontains $Vectors) {
+    Write-Error "Invalid -Vectors provider: $Vectors (expected none, gemini, voyage, or openai)"
+    exit 1
+}
 $dest = Join-Path $env:USERPROFILE ".claude"
 foreach ($d in 'skills', 'commands', 'ccc') {
     New-Item -ItemType Directory -Force (Join-Path $dest $d) | Out-Null
@@ -17,15 +23,14 @@ Copy-Item -Recurse -Force "skills/ccc" (Join-Path $dest "skills")
 # Keep MIT notice with the installed skill (source of truth: repo-root LICENSE).
 Copy-Item -Force "LICENSE" (Join-Path $dest "skills\ccc\LICENSE")
 Copy-Item -Force "commands/c3.md" (Join-Path $dest "commands")
-$fulltext = if ($NoFulltext) { 'false' } else { 'true' }
-@"
-{
-    "fulltext": $fulltext,
-    "vectors": { "provider": "$Vectors" }
+$fulltext = -not $NoFulltext
+$config = [ordered]@{
+    fulltext = $fulltext
+    vectors = [ordered]@{ provider = $Vectors }
 }
-"@ | Out-File -Encoding utf8 (Join-Path $dest "ccc\config.json")
+$config | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 (Join-Path $dest "ccc\config.json")
 
-Write-Host "Installed /ccc and /c3 (fulltext=$fulltext, vectors=$Vectors)."
+Write-Host "Installed /ccc and /c3 (fulltext=$($fulltext.ToString().ToLowerInvariant()), vectors=$Vectors)."
 if ($Vectors -ne 'none') {
     Write-Host "NOTE: set the $($Vectors.ToUpper())_API_KEY environment variable (default name) before the first catalog build."
 }
