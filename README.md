@@ -18,11 +18,11 @@ But checking the ecosystem by hand (or letting an LLM web-research it) costs rea
 
 | Phase | Frequency | Cost |
 |---|---|---|
-| **Crawl** — build `~/.claude/ccc/catalog.jsonl` from public sources | weekly (auto-triggered when stale) | HTTP only, no LLM calls |
+| **Crawl** — build `~/.claude/ccc/catalog.jsonl` from public sources | on first use; then when stale (>7 days), in the background | HTTP only, no LLM calls |
 | **Retrieve** — IDF-weighted keyword search over the catalog | every request | milliseconds, zero API cost |
 | **Propose** — Claude synthesizes the combination | every request | a few thousand tokens |
 
-No embedding API, no npm dependencies — Node.js standard library only.
+Default path: no embedding API, no npm dependencies — Node.js standard library only. Optional `--vectors` mode adds a REST embedding call (still no npm packages).
 
 ## How it works
 
@@ -30,7 +30,7 @@ No embedding API, no npm dependencies — Node.js standard library only.
 
 ```mermaid
 flowchart TB
-    subgraph sources["Catalog sources — crawled weekly, HTTP only, no LLM"]
+    subgraph sources["Catalog sources — crawled via HTTP only, no LLM"]
         A1["~/.claude/agents<br/>installed agents"]
         A2["~/.claude/skills<br/>installed skills"]
         B1["wshobson/agents<br/>marketplace.json"]
@@ -40,7 +40,7 @@ flowchart TB
         B5["MCP Registry<br/>v0/servers API"]
     end
 
-    CRON["weekly cron /<br/>Task Scheduler"] --> BUILD
+    CRON["optional weekly cron /<br/>Task Scheduler"] --> BUILD
     BUILD["build-index.mjs<br/>parse + dedupe, official first"]
     EMB["embed.mjs — optional<br/>Gemini / Voyage / OpenAI via REST"]
 
@@ -77,17 +77,20 @@ sequenceDiagram
 
     U->>C: /ccc "task description"
     C->>C: extract 4–8 English keywords
-    C->>S: node search.mjs --all "keywords"
+    C->>S: node search.mjs --all "keywords" --task "原文"
     S->>S: freshness check (meta.json)
-    alt catalog missing or older than 7 days
-        S->>B: rebuild (HTTP only, no LLM)
+    alt catalog missing
+        S->>B: sync rebuild (HTTP only, no LLM)
         B-->>S: fresh catalog
+    else catalog older than 7 days
+        S-->>S: serve current catalog
+        S->>B: rebuild in background
     end
     S->>S: IDF-weighted lexical scoring
     opt vectors enabled and API key set
         S->>S: embed query, cosine over vectors.bin, RRF fusion
     end
-    S-->>C: compact TSV, ≤21 rows, no install commands
+    S-->>C: compact TSV (per-kind caps: agent 5 / plugin 5 / skill 6 / mcp 5)
     C->>C: pick 3–5 finalists by priority policy<br/>(reuse > plugin > skill > MCP > standalone agent)
     C->>S: node search.mjs --get "finalists"
     S-->>C: full JSON with install commands
@@ -104,9 +107,11 @@ sequenceDiagram
 - [aitmpl.com](https://github.com/davila7/claude-code-templates) components catalog (800+ community skills)
 - [Official MCP Registry](https://registry.modelcontextprotocol.io) (~2,300 active servers)
 
-Add sources by editing `skills/ccc/scripts/build-index.mjs` (one function per source).
+Source counts above are approximate (as noted in the indexer). Add sources by editing `skills/ccc/scripts/build-index.mjs` (one function per source).
 
 ## Install
+
+**Prerequisites**: [Node.js](https://nodejs.org/) (for catalog build/search) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ```sh
 git clone https://github.com/happygoluckydev/c3.git
@@ -114,7 +119,7 @@ cd c3
 sh install.sh        # Windows PowerShell: ./install.ps1
 ```
 
-Then restart your Claude Code session and run `/ccc <task>` or `/c3 <task>`.
+This copies the skill to `~/.claude/skills/ccc/` and the `/c3` command alias to `~/.claude/commands/`, and writes `~/.claude/ccc/config.json`. Restart your Claude Code session, then run `/ccc <task>` or `/c3 <task>`.
 
 ### Install options
 
@@ -124,12 +129,13 @@ Then restart your Claude Code session and run `/ccc <task>` or `/c3 <task>`.
 | `--no-fulltext` | `-NoFulltext` | Lite: skip body indexing — catalog ~half the size, slightly lower recall. |
 | `--vectors gemini\|voyage\|openai` | `-Vectors gemini` | Hybrid search: lexical + embedding ranks fused with RRF. Needs `GEMINI_API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`. Embedding cost ≈ $0.01 per full rebuild (5k short texts); queries are one embed call each. |
 
-Options are stored in `~/.claude/ccc/config.json` — edit it (or re-run the installer) to switch modes. If the vector provider's API key is missing, everything gracefully falls back to lexical search.
+Options are stored in `~/.claude/ccc/config.json` — edit it (or re-run the installer) to switch modes. If the vector provider's API key is missing, search falls back to lexical mode.
 
 ## Keeping the catalog fresh
 
-The skill already rebuilds the catalog lazily when it is older than 7 days.
-To refresh it on a fixed schedule instead (no LLM tokens involved either way):
+On `/ccc`, `search.mjs` builds the catalog synchronously if it is missing. If it exists but is older than 7 days, the current catalog is used immediately and a rebuild starts in the background (HTTP only, no LLM).
+
+To refresh on a fixed schedule instead:
 
 ```sh
 sh setup-schedule.sh      # macOS/Linux: weekly cron job (Mon 09:00)
@@ -141,18 +147,30 @@ sh setup-schedule.sh      # macOS/Linux: weekly cron job (Mon 09:00)
 
 ## Recommendation policy
 
-Proposals follow a strict priority order:
+Proposals follow a strict priority order (see `skills/ccc/SKILL.md`):
 
-1. **No addition needed** — built-in features or already-installed agents win
+1. **No addition needed** — built-in features or already-installed agents/skills win
 2. **Plugins** — maintained bundles of agents + skills + commands
-3. **MCP servers** — only when external service access is truly required (they cost resident context)
-4. **Standalone community agents** — to fill remaining gaps
+3. **Skills** — procedural knowledge alone is enough; official skills preferred
+4. **MCP servers** — only when external service access is truly required (they cost resident context)
+5. **Standalone community agents** — to fill remaining gaps
 
 Community-made definition files can carry prompt-injection risks — c3 always reminds you to read them before installing.
 
+### Optional: prune unused agents
+
+If you want to inventory unused installed agents and estimate resident context cost:
+
+```sh
+node ~/.claude/skills/ccc/scripts/prune.mjs          # dry-run report
+node ~/.claude/skills/ccc/scripts/prune.mjs --apply  # archive unused to ~/.claude/agents-archive/
+```
+
 ## 日本語
 
-**「車輪の再発明をしたくない」から生まれたツールです。** 自作のエージェントやスキルを書き始める前に、エコシステムに既にある数千のプラグイン・エージェント・スキル・MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（手元の資産の再利用）→ プラグイン → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案する Claude Code スキルです。クロールは週1回のバッチ（LLM 不使用）、提案時はローカル検索のみなのでクレジット消費を最小化できます。導入は `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
+**「車輪の再発明をしたくない」から生まれたツールです。** 自作のエージェントやスキルを書き始める前に、エコシステムに既にある数千のプラグイン・エージェント・スキル・MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（手元の資産の再利用）→ プラグイン → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案する Claude Code スキルです。
+
+クロールは HTTP のみ（LLM 不使用）。カタログが無い初回は同期構築、7 日超で古い場合は手元のカタログで即応答しつつバックグラウンド再構築します。提案時の検索はローカルのみなのでクレジット消費を最小化できます。導入は Node.js がある環境で `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
 
 ## License
 
