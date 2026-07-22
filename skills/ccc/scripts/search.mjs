@@ -17,6 +17,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadConfig, resolveProvider, embedTexts, readVectors } from './embed.mjs';
 
 const DATA_DIR = path.join(os.homedir(), '.claude', 'ccc');
 const CATALOG = path.join(DATA_DIR, 'catalog.jsonl');
@@ -89,7 +90,7 @@ const N = docs.length;
 const idf = (t) => Math.log(1 + N / (1 + (df.get(t) || 0)));
 
 // フィールド重み: 名前ヒット > タグ > 説明文 > 本文。tf は短文なので 0/1 で扱う
-const scored = docs.map((d, i) => {
+let scored = docs.map((d, i) => {
     let score = 0;
     for (const t of qTokens) {
         if (fields[i].name.has(t)) score += 3 * idf(t);
@@ -100,6 +101,35 @@ const scored = docs.map((d, i) => {
     return { score, d };
 }).filter((r) => r.score > 0);
 scored.sort((a, b) => b.score - a.score);
+
+// --- ベクトル検索が有効(--vectors インストール + キー設定 + vectors.bin あり)なら RRF で融合 ---
+// 語彙検索で0点の候補もベクトル側から拾えるようになる(同義語・言い換え対策)。
+// 失敗時は警告して語彙検索のみで続行(検索が API 障害で死なないこと優先)
+const cfg = loadConfig();
+const prov = resolveProvider(cfg);
+const vec = (prov && !prov.missingKey) ? readVectors() : null;
+if (vec && vec.meta.count === docs.length && vec.meta.dims > 0) {
+    try {
+        const [q] = await embedTexts([query], prov);
+        const { dims } = vec.meta;
+        const sims = new Array(docs.length);
+        for (let i = 0; i < docs.length; i++) {
+            let s = 0;
+            const off = i * dims;
+            for (let k = 0; k < dims; k++) s += vec.arr[off + k] * q[k];
+            sims[i] = { i, s };
+        }
+        sims.sort((a, b) => b.s - a.s);
+        // RRF: score = Σ 1/(60+順位)。60 は RRF の標準定数
+        const fused = new Map();
+        scored.slice(0, 100).forEach((r, idx) => fused.set(r.d, 1 / (60 + idx)));
+        sims.slice(0, 100).forEach(({ i }, idx) => {
+            fused.set(docs[i], (fused.get(docs[i]) || 0) + 1 / (60 + idx));
+        });
+        scored = [...fused.entries()].map(([d, score]) => ({ score, d }));
+        scored.sort((a, b) => b.score - a.score);
+    } catch (e) { console.error(`vector search failed, lexical only: ${e.message}`); }
+}
 
 if (allQuery) {
     // --all: 種別ごとの上限を設けたタブ区切り軽量出力。

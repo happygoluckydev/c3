@@ -42,6 +42,16 @@ sh install.sh        # Windows PowerShell: ./install.ps1
 
 Then restart your Claude Code session and run `/ccc <task>` or `/c3 <task>`.
 
+### Install options
+
+| sh | PowerShell | Effect |
+|---|---|---|
+| (default) | (default) | Lexical search incl. document bodies (fulltext). Zero external services. |
+| `--no-fulltext` | `-NoFulltext` | Lite: skip body indexing — catalog ~half the size, slightly lower recall. |
+| `--vectors gemini\|voyage\|openai` | `-Vectors gemini` | Hybrid search: lexical + embedding ranks fused with RRF. Needs `GEMINI_API_KEY` / `VOYAGE_API_KEY` / `OPENAI_API_KEY`. Embedding cost ≈ $0.01 per full rebuild (5k short texts); queries are one embed call each. |
+
+Options are stored in `~/.claude/ccc/config.json` — edit it (or re-run the installer) to switch modes. If the vector provider's API key is missing, everything gracefully falls back to lexical search.
+
 ## Keeping the catalog fresh
 
 The skill already rebuilds the catalog lazily when it is older than 7 days.

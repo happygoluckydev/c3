@@ -6,8 +6,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { loadConfig, resolveProvider, embedTexts, writeVectors } from './embed.mjs';
 
 const OUT_DIR = path.join(os.homedir(), '.claude', 'ccc');
+// インストール時オプション(install.sh --no-fulltext / --vectors <provider>)は config.json 経由で効く
+const cfg = loadConfig();
 const entries = [];
 const errors = [];
 
@@ -247,11 +250,29 @@ async function indexMcpRegistry() {
         seen.add(k);
         return true;
     });
+    // 軽量インストール(--no-fulltext): 本文語彙を落としてカタログを約半分にする
+    if (cfg.fulltext === false) for (const e of unique) delete e.fulltext;
     fs.mkdirSync(OUT_DIR, { recursive: true });
     fs.writeFileSync(path.join(OUT_DIR, 'catalog.jsonl'), unique.map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    // ベクトル構築(--vectors <provider>): 名前+タグ+説明文を埋め込む。
+    // 本文全文は埋め込まない(ルーティング用途では説明文で十分、コストも1/10以下)
+    let vectors = false;
+    const prov = resolveProvider(cfg);
+    if (prov && prov.missingKey) {
+        errors.push(`vectors: 環境変数 ${prov.missingKey} が未設定のため埋め込みをスキップ(語彙検索のみで動作)`);
+    } else if (prov) {
+        try {
+            const texts = unique.map((e) => `${e.name}. ${(e.tags || []).join(' ')}. ${e.description}`.slice(0, 1500));
+            const vecs = await embedTexts(texts, prov);
+            writeVectors(vecs, { provider: prov.name, model: prov.model, builtAt: new Date().toISOString() });
+            vectors = true;
+        } catch (e) { errors.push(`vectors: ${e.message}`); }
+    }
+
     const counts = {};
     for (const e of unique) counts[e.kind] = (counts[e.kind] || 0) + 1;
-    const meta = { builtAt: new Date().toISOString(), total: unique.length, counts, errors };
+    const meta = { builtAt: new Date().toISOString(), total: unique.length, counts, fulltext: cfg.fulltext !== false, vectors, errors };
     fs.writeFileSync(path.join(OUT_DIR, 'meta.json'), JSON.stringify(meta, null, 2));
     console.log(JSON.stringify(meta, null, 2));
 })();
