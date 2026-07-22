@@ -113,6 +113,8 @@ scored.sort((a, b) => b.score - a.score);
 const cfg = loadConfig();
 const prov = resolveProvider(cfg);
 const vec = (prov && !prov.missingKey) ? readVectors() : null;
+// 透明性トレース用: 実際に使われた検索モードを記録し --all の # 行で報告する
+let searchMode = cfg.fulltext === false ? 'lexical(lite)' : 'lexical+fulltext';
 if (vec && vec.meta.count === docs.length && vec.meta.dims > 0) {
     try {
         // 原文があればそれを埋め込む: 多言語埋め込みは日本語原文を直接理解するため、
@@ -135,13 +137,33 @@ if (vec && vec.meta.count === docs.length && vec.meta.dims > 0) {
         });
         scored = [...fused.entries()].map(([d, score]) => ({ score, d }));
         scored.sort((a, b) => b.score - a.score);
+        searchMode += ` + vector RRF(${vec.meta.provider}/${vec.meta.model})`;
     } catch (e) { console.error(`vector search failed, lexical only: ${e.message}`); }
 }
 
 if (allQuery) {
     // --all: 種別ごとの上限を設けたタブ区切り軽量出力。
     // install や score は返さない(候補選定に不要。詳細は --get で取る)
+    //
+    // 先頭の # 行 = 透明性トレース。提案の根拠(いつのカタログを・どのクエリで・
+    // 何件中何件見せているか)を機械出力し、呼び出し側 LLM はこれを転記するだけにする。
+    // LLM の自己申告に頼らないことが透明性の担保になる(2026-07-22)
+    let builtAt = '不明';
+    let totalStr = '';
+    try {
+        const meta = JSON.parse(fs.readFileSync(META, 'utf8'));
+        builtAt = meta.builtAt;
+        totalStr = ` ${meta.total}件(` + Object.entries(meta.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
+    } catch { /* meta 欠損でも検索自体は続行 */ }
+    const kwTokens = [...new Set(tokenize(allQuery))];
+    const taskTokens = [...new Set(tokenize(taskText || ''))].filter((t) => !kwTokens.includes(t));
     const CAPS = { agent: 5, plugin: 5, skill: 6, mcp: 5 };
+    const hits = {};
+    for (const k of Object.keys(CAPS)) hits[k] = scored.filter((r) => r.d.kind === k).length;
+    console.log(`# catalog: ${builtAt} 構築,${totalStr}`);
+    console.log(`# mode: ${searchMode}`);
+    console.log(`# query: keywords[${kwTokens.join(' ')}]` + (taskTokens.length ? ` + 原文由来[${taskTokens.join(' ')}]` : ' (原文由来の追加トークンなし)'));
+    console.log(`# hits: ${Object.entries(hits).map(([k, v]) => `${k} ${v}`).join(' / ')} → 表示 ${Object.entries(CAPS).map(([k, v]) => `${k} ${Math.min(v, hits[k])}`).join(' / ')}`);
     console.log('kind\tname\tsource\tdescription');
     for (const kind of Object.keys(CAPS)) {
         for (const { d } of scored.filter((r) => r.d.kind === kind).slice(0, CAPS[kind])) {
