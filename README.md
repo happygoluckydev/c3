@@ -22,9 +22,10 @@ No embedding API, no npm dependencies — Node.js standard library only.
 
 ## Catalog sources
 
-- Your already-installed agents (`~/.claude/agents/`) — reuse comes first
+- Your already-installed agents and skills (`~/.claude/agents/`, `~/.claude/skills/`) — reuse comes first
 - [wshobson/agents](https://github.com/wshobson/agents) plugin marketplace (94 plugins)
 - [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) (100+ agents)
+- [anthropics/skills](https://github.com/anthropics/skills) — official Anthropic skills
 - [Official MCP Registry](https://registry.modelcontextprotocol.io) (~2,300 active servers)
 
 Add sources by editing `skills/ccc/scripts/build-index.mjs` (one function per source).

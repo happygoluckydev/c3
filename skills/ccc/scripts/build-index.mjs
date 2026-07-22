@@ -55,6 +55,52 @@ function indexInstalledAgents() {
     }
 }
 
+// --- ソース1b: 導入済みユーザースキル (~/.claude/skills/*/SKILL.md) ---
+// エージェント同様「既に持っているもの」の再利用を最優先で提案するため必ず含める
+function indexInstalledSkills() {
+    const dir = path.join(os.homedir(), '.claude', 'skills');
+    if (!fs.existsSync(dir)) return;
+    for (const d of fs.readdirSync(dir)) {
+        const skillMd = path.join(dir, d, 'SKILL.md');
+        if (!fs.existsSync(skillMd)) continue;
+        try {
+            const fm = parseFrontmatter(fs.readFileSync(skillMd, 'utf8'));
+            entries.push({
+                kind: 'skill',
+                name: fm.name || d,
+                description: fm.description || '',
+                source: 'installed',
+                install: '導入済み (~/.claude/skills)',
+            });
+        } catch (e) { errors.push(`installed-skill:${d}: ${e.message}`); }
+    }
+}
+
+// --- ソース1c: anthropics/skills 公式スキル集 ---
+// 件数が少ない(20件弱)ため tree API で SKILL.md を列挙し raw で frontmatter を個別取得する。
+// この方式は件数が増えるとリクエスト数が膨らむので、大規模ソースには使わないこと。
+async function indexAnthropicSkills() {
+    const tree = await fetchJson('https://api.github.com/repos/anthropics/skills/git/trees/main?recursive=1');
+    const paths = (tree.tree || [])
+        .map((t) => t.path)
+        .filter((p) => /^skills\/[^/]+\/SKILL\.md$/.test(p));
+    for (const p of paths) {
+        try {
+            const txt = await fetchText(`https://raw.githubusercontent.com/anthropics/skills/main/${p}`);
+            const fm = parseFrontmatter(txt);
+            const slug = p.split('/')[1];
+            entries.push({
+                kind: 'skill',
+                name: fm.name || slug,
+                description: fm.description || '',
+                source: 'anthropics/skills',
+                tags: ['official'],
+                install: `https://github.com/anthropics/skills/tree/main/skills/${slug} を ~/.claude/skills/${slug}/ に保存`,
+            });
+        } catch (e) { errors.push(`anthropics-skills:${p}: ${e.message}`); }
+    }
+}
+
 // --- ソース2: wshobson/agents 公式マーケットプレイス (94 プラグイン) ---
 // marketplace.json 1ファイルで全プラグインの説明が取れるので低コスト
 async function indexWshobson() {
@@ -130,10 +176,12 @@ async function indexMcpRegistry() {
 
 (async () => {
     indexInstalledAgents();
+    indexInstalledSkills();
     // リモートソースは1つ失敗しても他を続行する(ネットワーク・スキーマ変更に耐える)
     const jobs = [
         ['wshobson', indexWshobson],
         ['voltagent', indexVoltAgent],
+        ['anthropics-skills', indexAnthropicSkills],
         ['mcp-registry', indexMcpRegistry],
     ];
     for (const [label, fn] of jobs) {
