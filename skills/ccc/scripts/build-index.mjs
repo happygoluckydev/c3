@@ -101,6 +101,42 @@ async function indexAnthropicSkills() {
     }
 }
 
+// --- ソース1d: VoltAgent/awesome-agent-skills (ベンダー公式+コミュニティのスキルリスト) ---
+// README の「- **[name](url)** - 説明」形式の行から抽出する(1リクエスト)。
+// Microsoft 等ベンダー公式チーム製とコミュニティ製が混在するため tags で区別しない(URL で判断可能)
+async function indexVoltAgentSkills() {
+    const txt = await fetchText('https://raw.githubusercontent.com/VoltAgent/awesome-agent-skills/main/README.md');
+    const re = /^\s*-\s*\*\*\[([^\]]+)\]\(([^)]+)\)\*\*\s*[-–—]\s*(.+)$/gm;
+    let m;
+    while ((m = re.exec(txt)) !== null) {
+        entries.push({
+            kind: 'skill',
+            name: m[1].trim(),
+            description: m[3].trim(),
+            source: 'VoltAgent/awesome-agent-skills',
+            install: `${m[2]} を確認の上、SKILL.md を ~/.claude/skills/<名前>/ に保存`,
+        });
+    }
+}
+
+// --- ソース1e: aitmpl (davila7/claude-code-templates) コンポーネントカタログ ---
+// components.json 1ファイル(約2MB)に 800+ のコミュニティスキルが説明付きで入っている。
+// name はカテゴリ重複があるため path (例: security/security-audit) を名前として使う
+async function indexAitmplSkills() {
+    const j = await fetchJson('https://raw.githubusercontent.com/davila7/claude-code-templates/main/docs/components.json');
+    for (const s of j.skills || []) {
+        if (!s.path) continue;
+        entries.push({
+            kind: 'skill',
+            name: s.path,
+            description: (s.description || '').slice(0, 300),
+            source: 'aitmpl.com',
+            tags: [s.category].filter(Boolean),
+            install: `npx claude-code-templates@latest --skill="${s.path}" --yes`,
+        });
+    }
+}
+
 // --- ソース2: wshobson/agents 公式マーケットプレイス (94 プラグイン) ---
 // marketplace.json 1ファイルで全プラグインの説明が取れるので低コスト
 async function indexWshobson() {
@@ -182,6 +218,9 @@ async function indexMcpRegistry() {
         ['wshobson', indexWshobson],
         ['voltagent', indexVoltAgent],
         ['anthropics-skills', indexAnthropicSkills],
+        // 非公式スキルは公式より後に登録する(kind+name 重複時は先勝ちで公式が残る)
+        ['voltagent-skills', indexVoltAgentSkills],
+        ['aitmpl-skills', indexAitmplSkills],
         ['mcp-registry', indexMcpRegistry],
     ];
     for (const [label, fn] of jobs) {
