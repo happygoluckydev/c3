@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CATALOG, META, loadConfig, resolveProvider, embedTexts, readVectors, readJsonSafe } from './embed.mjs';
+import { CATALOG, META, CATALOG_SCHEMA_VERSION, loadConfig, resolveProvider, embedTexts, readVectors, readJsonSafe, withCatalogMetadata } from './embed.mjs';
 
 const BUILD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'build-index.mjs');
 
@@ -57,10 +57,13 @@ if (!fs.existsSync(CATALOG)) {
 function isStale() {
     const meta = readJsonSafe(META);
     if (!meta) return true;
+    if (meta.schemaVersion !== CATALOG_SCHEMA_VERSION) return true;
     return Date.now() - Date.parse(meta.builtAt) > 7 * 24 * 60 * 60 * 1000;
 }
 
-const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+    try { return [withCatalogMetadata(JSON.parse(l))]; } catch { return []; }
+});
 
 // --- --get: 一意な id で詳細を返す(採用候補のみに使う想定) ---
 // 旧カタログのために名前指定も維持するが、同名の異なる kind がある場合は曖昧な名前を
@@ -123,9 +126,11 @@ const fields = docs.map((d) => ({
     name: new Set(tokenize(d.name)),
     desc: new Set(tokenize(d.description)),
     tags: new Set(tokenize((d.tags || []).join(' '))),
-    // distribution/plugin と execution/background などは tags と別の分類軸。
+    // availability/packaging と execution などは tags と別の分類軸。
     // 新しい機能種別を名前に依存せず検索できるよう、同じ重みの facet として索引化する。
-    facets: new Set(tokenize([d.domain, d.distribution, d.execution].filter(Boolean).join(' '))),
+    // unknown は検索ノイズになるので索引から外す。
+    facets: new Set(tokenize([d.domain, d.availability, d.packaging, d.execution]
+        .filter((value) => value && value !== 'unknown').join(' '))),
     // fulltext: SKILL.md やエージェント定義の本文(あるソースのみ)。
     // 説明文に現れない語彙(具体的なAPI名・ファイル形式等)での取りこぼしを防ぐ
     body: new Set(tokenize(d.fulltext || '')),
@@ -236,7 +241,7 @@ let totalStr = '';
 const metaForTrace = readJsonSafe(META);
 if (metaForTrace) {
     builtAt = metaForTrace.builtAt;
-    totalStr = ` ${metaForTrace.total}件(` + Object.entries(metaForTrace.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
+    totalStr = ` schema=${metaForTrace.schemaVersion || '?'} ${metaForTrace.total}件(` + Object.entries(metaForTrace.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
 }
 console.log(`# catalog: ${builtAt} 構築,${totalStr}`);
 console.log(`# mode: ${searchMode}`);

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { DATA_DIR, CATALOG, META, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors, writeAtomic } from './embed.mjs';
+import { DATA_DIR, CATALOG, META, CATALOG_SCHEMA_VERSION, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors, writeAtomic, withCatalogMetadata } from './embed.mjs';
 
 // インストール時オプション(install.sh --no-fulltext / --vectors <provider>)は config.json 経由で効く
 const cfg = loadConfig();
@@ -119,12 +119,13 @@ function marketplaceEntry(plugin, { source, marketplace, marketplaceSource, extr
         source,
         tags: [...new Set([category, domain, ...pluginTags(plugin, extraTags)].filter(Boolean))],
         domain,
-        distribution: 'plugin',
+        availability: 'installable',
+        packaging: 'plugin',
         install: marketplaceInstall(name, marketplace, marketplaceSource),
     };
 }
 
-function componentEntry(kind, name, description, plugin, { tags = [], execution, install, prerequisites } = {}) {
+function componentEntry(kind, name, description, plugin, { tags = [], execution, install, prerequisites, availability = 'installable' } = {}) {
     return {
         kind,
         name,
@@ -136,8 +137,10 @@ function componentEntry(kind, name, description, plugin, { tags = [], execution,
             ...pluginTags(plugin, ['anthropic-curated', ...tags]),
         ].filter(Boolean))],
         domain: normalizeDomain(plugin.category),
-        distribution: 'plugin',
+        availability,
+        packaging: 'plugin-component',
         execution,
+        parentPlugin: plugin.name,
         install: install || marketplaceInstall(plugin.name, OFFICIAL_MARKETPLACE.name, OFFICIAL_MARKETPLACE.repo),
         ...(prerequisites && prerequisites.length ? { prerequisites } : {}),
     };
@@ -158,6 +161,9 @@ function indexInstalledAgents() {
                 name: fm.name || f.replace(/\.md$/, ''),
                 description: fm.description || '',
                 source: 'installed',
+                availability: 'installed',
+                packaging: 'standalone',
+                execution: 'isolated-agent',
                 install: '導入済み (~/.claude/agents)',
                 fulltext: clipBody(fm.body),
             });
@@ -181,6 +187,9 @@ function indexInstalledSkills() {
                 name: fm.name || d,
                 description: fm.description || '',
                 source: 'installed',
+                availability: 'installed',
+                packaging: 'standalone',
+                execution: 'prompt',
                 install: '導入済み (~/.claude/skills)',
                 fulltext: clipBody(fm.body),
             });
@@ -205,6 +214,8 @@ async function indexWshobson() {
             description: p.description || '',
             source: 'wshobson/agents',
             tags: [p.category].filter(Boolean),
+            availability: 'installable',
+            packaging: 'plugin',
             install: `/plugin marketplace add wshobson/agents してから /plugin install ${name}@claude-code-workflows`,
         });
     }
@@ -318,7 +329,7 @@ async function indexOfficialMarketplace() {
                 `${plugin.name}:${event}`,
                 `${plugin.description || plugin.name} — ${event} lifecycle hook.`,
                 plugin,
-                { tags: ['lifecycle', event], execution: 'deterministic' },
+                { tags: ['lifecycle', event], execution: 'deterministic-hook' },
             ));
         }));
         hooks.forEach((r, i) => {
@@ -365,8 +376,10 @@ function indexBuiltinAndContext() {
             description: 'Built-in file, search, shell, web, and bundled skill capabilities. Prefer these when no extension is needed.',
             source: 'claude-code built-in',
             tags: ['official', 'builtin', 'no-install'],
-            distribution: 'builtin',
+            availability: 'built-in',
+            packaging: 'built-in',
             execution: 'prompt',
+            sourceClass: 'official',
             install: '追加不要 (Claude Code 組み込み)',
         },
         {
@@ -375,8 +388,10 @@ function indexBuiltinAndContext() {
             description: 'Official plugin component for background monitor configurations. No official installable monitor plugin is currently declared; use this when authoring a plugin is required.',
             source: 'claude-code plugin API',
             tags: ['official', 'monitor', 'background', 'plugin-component'],
-            distribution: 'plugin-component',
-            execution: 'background',
+            availability: 'authoring-required',
+            packaging: 'plugin-component',
+            execution: 'background-monitor',
+            sourceClass: 'official',
             install: '公式プラグイン仕様に従い monitors/monitors.json を作成',
         },
     ];
@@ -394,7 +409,8 @@ function indexBuiltinAndContext() {
             description: `Already-installed ${scope} persistent Claude Code context.`,
             source: 'installed',
             tags: ['context', 'claude-md', scope],
-            distribution: 'standalone',
+            availability: 'installed',
+            packaging: 'standalone',
             execution: 'prompt',
             install: `導入済み (${file})`,
         });
@@ -419,6 +435,9 @@ async function indexAnthropicSkills() {
             description: fm.description || '',
             source: 'anthropics/skills',
             tags: ['official'],
+            availability: 'installable',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `https://github.com/anthropics/skills/tree/main/skills/${slug} を ~/.claude/skills/${slug}/ に保存`,
             fulltext: clipBody(fm.body),
         };
@@ -448,6 +467,9 @@ async function indexVoltAgent() {
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-claude-code-subagents',
+            availability: 'copy-and-adapt',
+            packaging: 'standalone',
+            execution: 'isolated-agent',
             install: `https://raw.githubusercontent.com/VoltAgent/awesome-claude-code-subagents/main/${relPath} を確認の上 ~/.claude/agents/ に保存`,
         });
     }
@@ -470,6 +492,9 @@ async function indexVoltAgentSkills() {
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-agent-skills',
+            availability: 'copy-and-adapt',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `${url} を確認の上、SKILL.md を ~/.claude/skills/<名前>/ に保存`,
         });
     }
@@ -492,6 +517,9 @@ async function indexAitmplSkills() {
             source: 'aitmpl.com',
             // keywords はカタログ側が付けた検索語。タグに合流させ検索再現率を上げる
             tags: [s.category, ...(Array.isArray(s.keywords) ? s.keywords : [])].filter(Boolean).slice(0, 12),
+            availability: 'installable',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `npx claude-code-templates@latest --skill=${skillPath} --yes`,
         });
     }
@@ -532,6 +560,9 @@ async function indexMcpRegistry() {
                 name: s.name,
                 description: s.description || '',
                 source: 'registry.modelcontextprotocol.io',
+                availability: 'installable',
+                packaging: 'standalone',
+                execution: 'external-service',
                 install,
             });
         }
@@ -568,14 +599,14 @@ async function indexMcpRegistry() {
         else errors.push(`${jobs[i][0]}: ${(r.reason && r.reason.message) || r.reason}`);
     });
 
-    // kind+name で重複排除(先勝ち = jobs の並び順が優先度になる)
+    // kind+name で重複排除(先勝ち = jobs の並び順が優先度になる)。照合は大小文字無視。
     const seen = new Set();
     const unique = entries.filter((e) => {
-        const k = `${e.kind}:${e.name}`;
+        const k = `${e.kind}:${e.name}`.toLowerCase();
         if (seen.has(k)) return false;
         seen.add(k);
         return true;
-    }).map((e) => ({ ...e, id: `${e.kind}:${e.name}` }));
+    }).map((e) => withCatalogMetadata({ ...e, id: `${e.kind}:${e.name}` }));
     // 軽量インストール(--no-fulltext): 本文語彙を落としてカタログを約半分にする
     if (cfg.fulltext === false) for (const e of unique) delete e.fulltext;
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -591,7 +622,7 @@ async function indexMcpRegistry() {
         errors.push(`vectors: 環境変数 ${prov.missingKey} が未設定のため埋め込みをスキップ(語彙検索のみで動作)`);
     } else if (prov) {
         try {
-            const texts = unique.map((e) => `${e.name}. ${(e.tags || []).join(' ')}. ${e.domain || ''} ${e.distribution || ''} ${e.execution || ''}. ${e.description}`.slice(0, 1500));
+            const texts = unique.map((e) => `${e.name}. ${(e.tags || []).join(' ')}. ${e.domain || ''} ${e.availability || ''} ${e.packaging || ''} ${e.execution || ''}. ${e.description}`.slice(0, 1500));
             const vecs = await embedTexts(texts, prov);
             writeVectors(vecs, { provider: prov.name, model: prov.model, builtAt: new Date().toISOString() });
             vectors = true;
@@ -600,7 +631,7 @@ async function indexMcpRegistry() {
 
     const counts = {};
     for (const e of unique) counts[e.kind] = (counts[e.kind] || 0) + 1;
-    const meta = { builtAt: new Date().toISOString(), total: unique.length, counts, fulltext: cfg.fulltext !== false, vectors, errors };
-    fs.writeFileSync(META, JSON.stringify(meta, null, 2));
+    const meta = { schemaVersion: CATALOG_SCHEMA_VERSION, builtAt: new Date().toISOString(), total: unique.length, counts, fulltext: cfg.fulltext !== false, vectors, errors };
+    writeAtomic(META, JSON.stringify(meta, null, 2));
     console.log(JSON.stringify(meta, null, 2));
 })();
