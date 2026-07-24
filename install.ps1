@@ -28,7 +28,9 @@ $config = [ordered]@{
     fulltext = $fulltext
     vectors = [ordered]@{ provider = $Vectors }
 }
-$config | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 (Join-Path $dest "ccc\config.json")
+# Write UTF-8 without BOM. `Out-File -Encoding utf8` adds a BOM that Node's JSON.parse rejects.
+$configPath = Join-Path $dest "ccc\config.json"
+[System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 3), [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "Installed /ccc and /c3 (fulltext=$($fulltext.ToString().ToLowerInvariant()), vectors=$Vectors)."
 if ($Vectors -ne 'none') {
