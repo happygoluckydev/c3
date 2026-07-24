@@ -1,14 +1,14 @@
 # c3 — Claude Code Concierge
 
-> **Don't reinvent the wheel.** The Claude Code ecosystem already ships thousands of plugins, agents, skills, hooks, LSP servers, and MCP servers. The hard part isn't building your own — it's knowing what already exists. c3 checks *before* you build.
+> **For people who already use many Claude Code skills, plugins, and MCP servers — and still lose time hunting the ecosystem before every task.**
 
-**/ccc** (or **/c3**) tells you the best combination of Claude Code **plugins, subagents, skills, hooks, LSP servers, monitors, output styles, persistent context, and MCP servers** for whatever task you describe — using a **local RAG catalog** so that each recommendation costs almost zero tokens.
+c3 turns that search into a local lookup. Instead of an afternoon of marketplace browsing or a 100k-token web research loop, **/ccc** (or **/c3**) returns a reuse-first shortlist in one pass — built-ins and installed assets first, then installable options — with almost no query-time token cost.
 
 ```
 /ccc I want to build a Stripe subscription billing page
 ```
 
-→ Returns a prioritized proposal table (what to reuse, what to install, what *not* to install) with ready-to-run install commands.
+→ Prioritized table: what to reuse, what to install, what *not* to install, plus ready-to-run install commands.
 
 ## Demo
 
@@ -133,16 +133,17 @@ Source counts above are approximate (as noted in the indexer). Add sources by ed
 | `output-style` | Response-format or presentation behavior |
 | `mcp` | Connection to an external service or tool provider |
 
-Where the source exposes enough structured information, classification uses independent facets rather than forcing everything into one hierarchy:
+Where the source exposes enough structured information, classification uses independent facets rather than forcing everything into one hierarchy (see [CATALOG_SCHEMA.md](./CATALOG_SCHEMA.md)):
 
 - `kind`: what the record does
-- `distribution`: `builtin`, `standalone`, `plugin`, or `plugin-component`
+- `availability`: whether it is `built-in`, `installed`, `installable`, `copy-and-adapt`, or `authoring-required`
+- `packaging`: whether it is `built-in`, `standalone`, `plugin`, or `plugin-component`
 - `domain`: normalized task area such as development, security, data, infrastructure, or productivity
 - `execution`: how it runs, such as prompt, isolated agent, deterministic hook, external service, or background monitor
 
 Marketplace-provided tags are preserved. `anthropic-authored` means the listed author is Anthropic; `anthropic-curated` means the plugin is listed in Anthropic's directory; and tags such as `community-managed` stay attached to third-party entries. A public marketplace listing does not by itself assert an open-source license.
 
-These optional facets let search distinguish a plugin (packaging), a Hook (execution behavior), and security (domain) instead of treating them as equivalent categories. Legacy/community entries without reliable metadata continue to work through `kind`, tags, descriptions, and fulltext.
+These facets let search distinguish install state (`availability`), packaging form (`packaging`), a Hook (execution behavior), and security (domain) instead of overloading one field. Legacy/community entries without reliable metadata continue to work through `kind`, tags, descriptions, and fulltext.
 
 `--all` returns a stable `id` column in `kind:name` form. Pass those IDs to `--get` when requesting details; a bare name is still accepted only if it identifies one record.
 
@@ -174,7 +175,7 @@ Options are stored in `~/.claude/ccc/config.json` — edit it (or re-run the ins
 
 Default query-time search is **local-only** (lexical / fulltext); catalog refreshes still access the public sources listed above. With `--vectors`, the chosen provider receives:
 
-- **Catalog rebuild**: names, tags, descriptions, and the `domain` / `distribution` / `execution` facets for embedding (not fulltext bodies or `CLAUDE.md` contents)
+- **Catalog rebuild**: names, tags, descriptions, and the `domain` / `availability` / `packaging` / `execution` facets for embedding (not fulltext bodies or `CLAUDE.md` contents)
 - **Each `/ccc` query**: the search query string (keywords / task text) for one embed call
 
 API keys stay in your environment variables. Review the provider's terms and data policies before enabling. For confidential task text, keep the default lexical mode (no external embed calls).
@@ -218,7 +219,7 @@ node ~/.claude/skills/ccc/scripts/prune.mjs --apply  # archive unused to ~/.clau
 
 ![c3 の操作イメージ: /ccc を実行して優先順位付きの提案を得る](./assets/demo-ja.gif)
 
-**「車輪の再発明をしたくない」から生まれたツールです。** 自作のエージェントやスキルを書き始める前に、Claude Code の組み込み機能、手元の永続コンテキスト、Anthropic が作成または選定した公開プラグイン、スキル、エージェント、Hook、LSP、Monitor、Output Style、MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（組み込み機能・既存資産の再利用）→ Anthropic作成／選定プラグイン・機能コンポーネント → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案します。
+**すでに複数のスキル・プラグイン・MCP を使っている人が、毎回のエコシステム探索に費やす時間を減らすためのツールです。** 自作のエージェントやスキルを書き始める前に、Claude Code の組み込み機能、手元の永続コンテキスト、Anthropic が作成または選定した公開プラグイン、スキル、エージェント、Hook、LSP、Monitor、Output Style、MCP サーバーから「もう存在するもの」を探して提案します。タスクを伝えると「追加不要（組み込み機能・既存資産の再利用）→ Anthropic作成／選定プラグイン・機能コンポーネント → スキル → MCP → コミュニティ製エージェント」の優先順で最適な組み合わせを提案します。
 
 クロールは HTTP のみ（LLM 不使用）で、Anthropic の公式プラグインディレクトリ、公式コミュニティディレクトリ、Knowledge Work Plugins、公式 Skills、公開コミュニティ一覧、公式 MCP Registry を収録します。カタログが無い初回は同期構築、7 日超で古い場合は手元のカタログで即応答しつつバックグラウンド再構築します。提案時の検索はローカルのみなのでクレジット消費を最小化できます。導入は Node.js がある環境で `install.sh`（または `install.ps1`）を実行し、新しいセッションで `/ccc <やりたいこと>` を実行してください。
 
