@@ -7,11 +7,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { DATA_DIR, CATALOG, META, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors, writeAtomic } from './embed.mjs';
+import { DATA_DIR, CATALOG, META, CATALOG_SCHEMA_VERSION, parseFrontmatter, loadConfig, resolveProvider, embedTexts, writeVectors, writeAtomic, withCatalogMetadata } from './embed.mjs';
 
 // インストール時オプション(install.sh --no-fulltext / --vectors <provider>)は config.json 経由で効く
 const cfg = loadConfig();
 const errors = [];
+
+// 収録対象は「配布物(plugin)」と「実行時の機能種別(skill / hook / LSP など)」を
+// 分ける。plugin は複数の機能を束ねる配布形式であり、他の kind と同列の能力ではない。
+const OFFICIAL_MARKETPLACE = {
+    repo: 'anthropics/claude-plugins-official',
+    name: 'claude-plugins-official',
+    url: 'https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/.claude-plugin/marketplace.json',
+};
 
 async function fetchOk(url) {
     const res = await fetch(url, { headers: { 'User-Agent': 'ccc' } });
@@ -55,6 +63,89 @@ function safeForInstallString(value, source) {
     return s;
 }
 
+// 公開マーケットプレイスの分類名はソースごとに少しずつ異なる。検索・集計に使える
+// 粗いドメインへ正規化し、元の分類名は tags に残す。
+function normalizeDomain(category) {
+    const c = String(category || '').trim().toLowerCase();
+    const aliases = {
+        database: 'data', data: 'data', analytics: 'data',
+        deployment: 'infrastructure', infrastructure: 'infrastructure', monitoring: 'infrastructure',
+        development: 'development', security: 'security', testing: 'testing',
+        design: 'design', productivity: 'productivity',
+        documentation: 'documents', documents: 'documents',
+        communication: 'communication', automation: 'automation',
+        business: 'business', research: 'research', learning: 'research',
+    };
+    return aliases[c] || (c ? 'other' : undefined);
+}
+
+function marketplaceInstall(pluginName, marketplaceName, marketplaceSource = marketplaceName) {
+    return `/plugin marketplace add ${marketplaceSource} してから /plugin install ${pluginName}@${marketplaceName}`;
+}
+
+function pluginTags(plugin, extraTags = []) {
+    const upstreamTags = Array.isArray(plugin.tags)
+        ? plugin.tags.filter((tag) => typeof tag === 'string').map((tag) => tag.trim()).filter(Boolean)
+        : [];
+    const author = typeof plugin.author === 'object' ? plugin.author.name : plugin.author;
+    const authoredByAnthropic = String(author || '').trim().toLowerCase() === 'anthropic';
+    return [...new Set([
+        ...upstreamTags,
+        ...extraTags,
+        ...(authoredByAnthropic ? ['anthropic-authored'] : []),
+    ].filter(Boolean))];
+}
+
+function officialPluginReadme(plugin) {
+    if (typeof plugin.source === 'string' && plugin.source.startsWith('./')) {
+        const relative = safeCatalogPath(plugin.source.slice(2), OFFICIAL_MARKETPLACE.repo);
+        if (relative) return `https://github.com/${OFFICIAL_MARKETPLACE.repo}/tree/main/${relative}`;
+    }
+    const homepage = plugin.homepage
+        ? safeForInstallString(plugin.homepage, OFFICIAL_MARKETPLACE.repo)
+        : null;
+    return homepage || 'Claude Code のプラグイン詳細を確認';
+}
+
+function marketplaceEntry(plugin, { source, marketplace, marketplaceSource, extraTags = [] }) {
+    const name = safeForInstallString(plugin.name, source);
+    if (!name) return null;
+    const category = String(plugin.category || '').trim();
+    const domain = normalizeDomain(category);
+    return {
+        kind: 'plugin',
+        name,
+        description: plugin.description || '',
+        source,
+        tags: [...new Set([category, domain, ...pluginTags(plugin, extraTags)].filter(Boolean))],
+        domain,
+        availability: 'installable',
+        packaging: 'plugin',
+        install: marketplaceInstall(name, marketplace, marketplaceSource),
+    };
+}
+
+function componentEntry(kind, name, description, plugin, { tags = [], execution, install, prerequisites, availability = 'installable' } = {}) {
+    return {
+        kind,
+        name,
+        description,
+        source: OFFICIAL_MARKETPLACE.repo,
+        tags: [...new Set([
+            kind,
+            normalizeDomain(plugin.category),
+            ...pluginTags(plugin, ['anthropic-curated', ...tags]),
+        ].filter(Boolean))],
+        domain: normalizeDomain(plugin.category),
+        availability,
+        packaging: 'plugin-component',
+        execution,
+        parentPlugin: plugin.name,
+        install: install || marketplaceInstall(plugin.name, OFFICIAL_MARKETPLACE.name, OFFICIAL_MARKETPLACE.repo),
+        ...(prerequisites && prerequisites.length ? { prerequisites } : {}),
+    };
+}
+
 // --- ソース: 導入済みユーザーエージェント (~/.claude/agents) ---
 // 「既に持っているもの」を最優先で提案するために必ずカタログに含める
 function indexInstalledAgents() {
@@ -70,6 +161,9 @@ function indexInstalledAgents() {
                 name: fm.name || f.replace(/\.md$/, ''),
                 description: fm.description || '',
                 source: 'installed',
+                availability: 'installed',
+                packaging: 'standalone',
+                execution: 'isolated-agent',
                 install: '導入済み (~/.claude/agents)',
                 fulltext: clipBody(fm.body),
             });
@@ -93,6 +187,9 @@ function indexInstalledSkills() {
                 name: fm.name || d,
                 description: fm.description || '',
                 source: 'installed',
+                availability: 'installed',
+                packaging: 'standalone',
+                execution: 'prompt',
                 install: '導入済み (~/.claude/skills)',
                 fulltext: clipBody(fm.body),
             });
@@ -117,7 +214,205 @@ async function indexWshobson() {
             description: p.description || '',
             source: 'wshobson/agents',
             tags: [p.category].filter(Boolean),
+            availability: 'installable',
+            packaging: 'plugin',
             install: `/plugin marketplace add wshobson/agents してから /plugin install ${name}@claude-code-workflows`,
+        });
+    }
+    return out;
+}
+
+// --- ソース: Anthropic公式・コミュニティのプラグインマーケットプレイス ---
+// marketplace.json は配布単位(plugin)を列挙する最も安定した一次情報。個別リポジトリを
+// 推測してクロールせず、Claude Code がそのままインストールする定義だけを採用する。
+async function indexMarketplace(url, { source, marketplaceSource, extraTags = [] }) {
+    const j = await fetchJson(url);
+    const marketplace = safeForInstallString(j.name, source);
+    if (!marketplace) return [];
+    const out = [];
+    for (const plugin of j.plugins || []) {
+        const entry = marketplaceEntry(plugin, { source, marketplace, marketplaceSource, extraTags });
+        if (entry) out.push(entry);
+    }
+    return out;
+}
+
+// 公式ディレクトリは plugin の説明だけでなく、LSP を marketplace.json で明示している。
+// Hook は公式リポジトリ内の hooks.json を読む。これにより plugin という包装だけでなく、
+// 実際に使える機能種別でも検索できる。
+async function indexOfficialMarketplace() {
+    const j = await fetchJson(OFFICIAL_MARKETPLACE.url);
+    const marketplace = safeForInstallString(j.name, OFFICIAL_MARKETPLACE.repo);
+    if (!marketplace) return [];
+    const plugins = (j.plugins || []).filter((p) => safeForInstallString(p.name, OFFICIAL_MARKETPLACE.repo));
+    const out = [];
+    for (const plugin of plugins) {
+        const entry = marketplaceEntry(plugin, {
+            source: OFFICIAL_MARKETPLACE.repo,
+            marketplace,
+            marketplaceSource: OFFICIAL_MARKETPLACE.repo,
+            extraTags: ['anthropic-curated'],
+        });
+        if (entry) out.push(entry);
+
+        // lspServers は公式 marketplace に明示された構造化データなので、個別ソース取得なしで
+        // 正確に LSP カテゴリを作れる。
+        if (plugin.lspServers) {
+            const servers = typeof plugin.lspServers === 'object' && !Array.isArray(plugin.lspServers)
+                ? Object.keys(plugin.lspServers)
+                : [plugin.name];
+            for (const server of servers) {
+                const config = typeof plugin.lspServers === 'object' && !Array.isArray(plugin.lspServers)
+                    ? plugin.lspServers[server]
+                    : null;
+                const command = config && typeof config === 'object' && typeof config.command === 'string'
+                    ? (safeForInstallString(config.command, `${OFFICIAL_MARKETPLACE.repo}:${plugin.name}:lsp`) || '')
+                    : '';
+                const setup = officialPluginReadme(plugin);
+                const prerequisite = command
+                    ? `${command} を PATH 上で実行できるように言語サーバーを別途インストール`
+                    : '言語サーバーの実行ファイルを別途インストール';
+                out.push(componentEntry(
+                    'lsp',
+                    `${plugin.name}:${server}`,
+                    `${plugin.description || plugin.name} Language Server Protocol integration for code intelligence. Prerequisite: ${prerequisite}.`,
+                    plugin,
+                    {
+                        tags: ['code-intelligence', 'language-server'],
+                        execution: 'external-service',
+                        prerequisites: [prerequisite],
+                        install: `${marketplaceInstall(plugin.name, marketplace, OFFICIAL_MARKETPLACE.repo)}; 次に ${prerequisite}。設定手順: ${setup}`,
+                    },
+                ));
+            }
+        }
+
+        // Output style は現行公式マーケットプレイスでは専用 plugin として配布されている。
+        // 表記揺れを許容しつつ、説明・名前が明示するものだけを採用して誤分類を避ける。
+        if (/output[- ]style/i.test(`${plugin.name} ${plugin.description || ''}`)) {
+            out.push(componentEntry(
+                'output-style',
+                plugin.name,
+                plugin.description || 'Claude Code output style plugin.',
+                plugin,
+                { tags: ['presentation', 'response-format'], execution: 'prompt' },
+            ));
+        }
+
+        // CLAUDE.md を扱う plugin は、永続コンテキストを再利用する候補として別カテゴリ化する。
+        if (/claude[ .-]?md/i.test(`${plugin.name} ${plugin.description || ''}`)) {
+            out.push(componentEntry(
+                'context',
+                plugin.name,
+                plugin.description || 'Claude Code persistent context plugin.',
+                plugin,
+                { tags: ['claude-md', 'persistent-context'], execution: 'prompt' },
+            ));
+        }
+    }
+
+    // リポジトリ内 plugin の hooks.json は marketplace の source が ./ で始まるものだけを
+    // 対象にする。外部リポジトリを無差別に追わず、Anthropic 管理リポジトリの公開内容だけを
+    // 取得するため、更新時のコストとサプライチェーン上の面積を抑えられる。
+    try {
+        const tree = await fetchJson('https://api.github.com/repos/anthropics/claude-plugins-official/git/trees/main?recursive=1');
+        const treePaths = new Set((tree.tree || []).map((t) => t.path));
+        const directPlugins = plugins.filter((p) => typeof p.source === 'string' && p.source.startsWith('./'));
+        const hooks = await Promise.allSettled(directPlugins.map(async (plugin) => {
+            const relative = safeCatalogPath(plugin.source.slice(2), OFFICIAL_MARKETPLACE.repo);
+            if (!relative) return [];
+            const hookPath = `${relative}/hooks/hooks.json`;
+            if (!treePaths.has(hookPath)) return [];
+            const config = await fetchJson(`https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/${hookPath}`);
+            return Object.keys(config.hooks || {}).map((event) => componentEntry(
+                'hook',
+                `${plugin.name}:${event}`,
+                `${plugin.description || plugin.name} — ${event} lifecycle hook.`,
+                plugin,
+                { tags: ['lifecycle', event], execution: 'deterministic-hook' },
+            ));
+        }));
+        hooks.forEach((r, i) => {
+            if (r.status === 'fulfilled') out.push(...r.value);
+            else errors.push(`official-hooks:${directPlugins[i].name}: ${r.reason && r.reason.message}`);
+        });
+    } catch (e) {
+        // tree API が一時的に失敗しても、既に取得済みの公式 plugin/LSP/Output Style を捨てない。
+        errors.push(`official-hooks: ${e.message}`);
+    }
+    return out;
+}
+
+async function indexOfficialCommunityPlugins() {
+    return indexMarketplace(
+        'https://raw.githubusercontent.com/anthropics/claude-plugins-community/main/.claude-plugin/marketplace.json',
+        {
+            source: 'anthropics/claude-plugins-community',
+            marketplaceSource: 'anthropics/claude-plugins-community',
+            extraTags: ['community'],
+        },
+    );
+}
+
+async function indexKnowledgeWorkPlugins() {
+    return indexMarketplace(
+        'https://raw.githubusercontent.com/anthropics/knowledge-work-plugins/main/.claude-plugin/marketplace.json',
+        {
+            source: 'anthropics/knowledge-work-plugins',
+            marketplaceSource: 'anthropics/knowledge-work-plugins',
+            extraTags: ['anthropic-published', 'knowledge-work'],
+        },
+    );
+}
+
+// --- ソース: Claude Code標準機能とローカルの永続コンテキスト ---
+// 「追加不要」を根拠付きで提案するための builtin と、既にある CLAUDE.md/rules を index 化する。
+// 本文は機密情報を含み得るので、context は存在と配置だけを保持し本文を保存しない。
+function indexBuiltinAndContext() {
+    const out = [
+        {
+            kind: 'builtin',
+            name: 'Claude Code built-in tools and skills',
+            description: 'Built-in file, search, shell, web, and bundled skill capabilities. Prefer these when no extension is needed.',
+            source: 'claude-code built-in',
+            tags: ['official', 'builtin', 'no-install'],
+            availability: 'built-in',
+            packaging: 'built-in',
+            execution: 'prompt',
+            sourceClass: 'official',
+            install: '追加不要 (Claude Code 組み込み)',
+        },
+        {
+            kind: 'monitor',
+            name: 'Claude Code plugin monitor configuration',
+            description: 'Official plugin component for background monitor configurations. No official installable monitor plugin is currently declared; use this when authoring a plugin is required.',
+            source: 'claude-code plugin API',
+            tags: ['official', 'monitor', 'background', 'plugin-component'],
+            availability: 'authoring-required',
+            packaging: 'plugin-component',
+            execution: 'background-monitor',
+            sourceClass: 'official',
+            install: '公式プラグイン仕様に従い monitors/monitors.json を作成',
+        },
+    ];
+    const candidates = [
+        { file: path.join(os.homedir(), '.claude', 'CLAUDE.md'), scope: 'user' },
+        { file: path.join(process.cwd(), 'CLAUDE.md'), scope: 'project' },
+        { file: path.join(process.cwd(), 'CLAUDE.local.md'), scope: 'project-local' },
+        { file: path.join(process.cwd(), '.claude', 'CLAUDE.md'), scope: 'project' },
+    ];
+    for (const { file, scope } of candidates) {
+        if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+        out.push({
+            kind: 'context',
+            name: `${scope}:${path.basename(file)}`,
+            description: `Already-installed ${scope} persistent Claude Code context.`,
+            source: 'installed',
+            tags: ['context', 'claude-md', scope],
+            availability: 'installed',
+            packaging: 'standalone',
+            execution: 'prompt',
+            install: `導入済み (${file})`,
         });
     }
     return out;
@@ -140,6 +435,9 @@ async function indexAnthropicSkills() {
             description: fm.description || '',
             source: 'anthropics/skills',
             tags: ['official'],
+            availability: 'installable',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `https://github.com/anthropics/skills/tree/main/skills/${slug} を ~/.claude/skills/${slug}/ に保存`,
             fulltext: clipBody(fm.body),
         };
@@ -169,6 +467,9 @@ async function indexVoltAgent() {
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-claude-code-subagents',
+            availability: 'copy-and-adapt',
+            packaging: 'standalone',
+            execution: 'isolated-agent',
             install: `https://raw.githubusercontent.com/VoltAgent/awesome-claude-code-subagents/main/${relPath} を確認の上 ~/.claude/agents/ に保存`,
         });
     }
@@ -191,6 +492,9 @@ async function indexVoltAgentSkills() {
             name: m[1].trim(),
             description: m[3].trim(),
             source: 'VoltAgent/awesome-agent-skills',
+            availability: 'copy-and-adapt',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `${url} を確認の上、SKILL.md を ~/.claude/skills/<名前>/ に保存`,
         });
     }
@@ -213,6 +517,9 @@ async function indexAitmplSkills() {
             source: 'aitmpl.com',
             // keywords はカタログ側が付けた検索語。タグに合流させ検索再現率を上げる
             tags: [s.category, ...(Array.isArray(s.keywords) ? s.keywords : [])].filter(Boolean).slice(0, 12),
+            availability: 'installable',
+            packaging: 'standalone',
+            execution: 'prompt',
             install: `npx claude-code-templates@latest --skill=${skillPath} --yes`,
         });
     }
@@ -253,6 +560,9 @@ async function indexMcpRegistry() {
                 name: s.name,
                 description: s.description || '',
                 source: 'registry.modelcontextprotocol.io',
+                availability: 'installable',
+                packaging: 'standalone',
+                execution: 'external-service',
                 install,
             });
         }
@@ -264,12 +574,17 @@ async function indexMcpRegistry() {
 
 (async () => {
     // ソース一覧。配列の順序 = 重複排除(kind+name 先勝ち)の優先度そのもの:
-    // installed → 公式 → コミュニティ → レジストリ。ソース追加時は優先度に合う位置へ挿入する
+    // builtin/installed → Anthropic公式 → 公式コミュニティ → オープンコミュニティ → レジストリ。
+    // plugin は配布形式、hook/LSP/monitor/output-style/context は機能種別として並存する。
     const jobs = [
+        ['builtin-and-context', indexBuiltinAndContext],
         ['installed-agents', indexInstalledAgents],
         ['installed-skills', indexInstalledSkills],
-        ['wshobson', indexWshobson],
+        ['anthropic-official-marketplace', indexOfficialMarketplace],
+        ['anthropic-community-marketplace', indexOfficialCommunityPlugins],
+        ['anthropic-knowledge-work-marketplace', indexKnowledgeWorkPlugins],
         ['anthropics-skills', indexAnthropicSkills],
+        ['wshobson', indexWshobson],
         ['voltagent-agents', indexVoltAgent],
         ['voltagent-skills', indexVoltAgentSkills],
         ['aitmpl-skills', indexAitmplSkills],
@@ -284,14 +599,14 @@ async function indexMcpRegistry() {
         else errors.push(`${jobs[i][0]}: ${(r.reason && r.reason.message) || r.reason}`);
     });
 
-    // kind+name で重複排除(先勝ち = jobs の並び順が優先度になる)
+    // kind+name で重複排除(先勝ち = jobs の並び順が優先度になる)。照合は大小文字無視。
     const seen = new Set();
     const unique = entries.filter((e) => {
-        const k = `${e.kind}:${e.name}`;
+        const k = `${e.kind}:${e.name}`.toLowerCase();
         if (seen.has(k)) return false;
         seen.add(k);
         return true;
-    });
+    }).map((e) => withCatalogMetadata({ ...e, id: `${e.kind}:${e.name}` }));
     // 軽量インストール(--no-fulltext): 本文語彙を落としてカタログを約半分にする
     if (cfg.fulltext === false) for (const e of unique) delete e.fulltext;
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -307,7 +622,7 @@ async function indexMcpRegistry() {
         errors.push(`vectors: 環境変数 ${prov.missingKey} が未設定のため埋め込みをスキップ(語彙検索のみで動作)`);
     } else if (prov) {
         try {
-            const texts = unique.map((e) => `${e.name}. ${(e.tags || []).join(' ')}. ${e.description}`.slice(0, 1500));
+            const texts = unique.map((e) => `${e.name}. ${(e.tags || []).join(' ')}. ${e.domain || ''} ${e.availability || ''} ${e.packaging || ''} ${e.execution || ''}. ${e.description}`.slice(0, 1500));
             const vecs = await embedTexts(texts, prov);
             writeVectors(vecs, { provider: prov.name, model: prov.model, builtAt: new Date().toISOString() });
             vectors = true;
@@ -316,7 +631,7 @@ async function indexMcpRegistry() {
 
     const counts = {};
     for (const e of unique) counts[e.kind] = (counts[e.kind] || 0) + 1;
-    const meta = { builtAt: new Date().toISOString(), total: unique.length, counts, fulltext: cfg.fulltext !== false, vectors, errors };
-    fs.writeFileSync(META, JSON.stringify(meta, null, 2));
+    const meta = { schemaVersion: CATALOG_SCHEMA_VERSION, builtAt: new Date().toISOString(), total: unique.length, counts, fulltext: cfg.fulltext !== false, vectors, errors };
+    writeAtomic(META, JSON.stringify(meta, null, 2));
     console.log(JSON.stringify(meta, null, 2));
 })();

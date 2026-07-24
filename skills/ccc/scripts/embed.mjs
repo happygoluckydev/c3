@@ -14,10 +14,92 @@ export const CATALOG = path.join(DATA_DIR, 'catalog.jsonl');
 export const META = path.join(DATA_DIR, 'meta.json');
 export const VEC_BIN = path.join(DATA_DIR, 'vectors.bin');
 export const VEC_META = path.join(DATA_DIR, 'vectors.json');
+// Shared with c2. Bump when the catalog entry contract changes (see CATALOG_SCHEMA.md).
+export const CATALOG_SCHEMA_VERSION = 3;
 const CONFIG = path.join(DATA_DIR, 'config.json');
 
 // config.json が無い場合の既定値 = 従来挙動(本文索引あり・ベクトルなし)
 const DEFAULTS = { fulltext: true, vectors: { provider: 'none' } };
+
+const AVAILABILITIES = new Set(['built-in', 'installed', 'installable', 'copy-and-adapt', 'authoring-required', 'unknown']);
+const PACKAGINGS = new Set(['built-in', 'standalone', 'plugin', 'plugin-component', 'unknown']);
+const EXECUTIONS = new Set(['prompt', 'isolated-agent', 'deterministic-hook', 'external-service', 'background-monitor', 'unknown']);
+const SOURCE_CLASSES = new Set(['official', 'community', 'unknown']);
+const MATURITY_LEVELS = new Set(['stable', 'experimental', 'deprecated', 'unknown']);
+const EXECUTION_ALIASES = {
+    deterministic: 'deterministic-hook',
+    background: 'background-monitor',
+    agent: 'isolated-agent',
+};
+const LEGACY_PACKAGING = {
+    builtin: 'built-in',
+    'built-in': 'built-in',
+    standalone: 'standalone',
+    plugin: 'plugin',
+    'plugin-component': 'plugin-component',
+};
+const LEGACY_AVAILABILITY = {
+    'built-in': 'built-in',
+    installed: 'installed',
+    installable: 'installable',
+    'copy-and-adapt': 'copy-and-adapt',
+    'authoring-required': 'authoring-required',
+};
+const list = (value, fallback) => {
+    const items = (Array.isArray(value) ? value : value ? [value] : []).map((item) => String(item).trim()).filter(Boolean);
+    return items.length ? [...new Set(items)] : fallback;
+};
+
+function migrateDistribution(distribution) {
+    const value = String(distribution || '').trim().toLowerCase();
+    if (!value) return { availability: 'unknown', packaging: 'unknown' };
+    if (LEGACY_PACKAGING[value]) {
+        const packaging = LEGACY_PACKAGING[value];
+        const availability = packaging === 'built-in' ? 'built-in'
+            : packaging === 'standalone' ? 'installed'
+            : 'installable';
+        return { availability, packaging };
+    }
+    if (LEGACY_AVAILABILITY[value]) {
+        return {
+            availability: LEGACY_AVAILABILITY[value],
+            packaging: value === 'built-in' ? 'built-in' : 'unknown',
+        };
+    }
+    return { availability: 'unknown', packaging: 'unknown' };
+}
+
+export function inferSourceClass(source = '') {
+    if (source === 'claude-code built-in' || source === 'claude-code plugin API' || source === 'anthropics/claude-plugins-official') return 'official';
+    if (source === 'anthropics/skills' || source === 'anthropics/claude-plugins-community' || source === 'anthropics/knowledge-work-plugins') return 'community';
+    if (['wshobson/agents', 'VoltAgent/awesome-claude-code-subagents', 'VoltAgent/awesome-agent-skills', 'aitmpl.com'].includes(source)) return 'community';
+    return 'unknown';
+}
+
+// Normalize shared catalog fields and strip the legacy `distribution` key.
+export function withCatalogMetadata(entry) {
+    const migrated = migrateDistribution(entry.distribution);
+    const availability = AVAILABILITIES.has(entry.availability) ? entry.availability : migrated.availability;
+    const packaging = PACKAGINGS.has(entry.packaging) ? entry.packaging : migrated.packaging;
+    const executionRaw = EXECUTION_ALIASES[entry.execution] || entry.execution || 'unknown';
+    const sourceClass = SOURCE_CLASSES.has(entry.sourceClass) ? entry.sourceClass : inferSourceClass(entry.source);
+    const { distribution, ...rest } = entry;
+    return {
+        ...rest,
+        id: entry.id || `${entry.kind}:${entry.name}`,
+        platform: entry.platform || 'claude-code',
+        availability,
+        packaging,
+        domain: entry.domain || 'unknown',
+        execution: EXECUTIONS.has(executionRaw) ? executionRaw : 'unknown',
+        sourceClass,
+        license: String(entry.license || 'unknown').trim() || 'unknown',
+        maturity: MATURITY_LEVELS.has(entry.maturity) ? entry.maturity : 'unknown',
+        surface: list(entry.surface, ['unknown']),
+        parentPlugin: entry.parentPlugin || null,
+        permissions: list(entry.permissions, ['unknown']),
+    };
+}
 
 // 書き込み→リネームにすることで、書き込み中のクラッシュで catalog.jsonl / vectors.* が
 // 壊れた状態のまま次回の search.mjs に読まれることを防ぐ(Codex版 c2 からの逆輸入)

@@ -12,12 +12,12 @@
 //
 // 使い方:
 //   node search.mjs --all "<英語キーワード>" [--task "<タスク原文>"]
-//   node search.mjs --get "<name1,name2,...>"
+//   node search.mjs --get "<kind:name1,kind:name2,...>"
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CATALOG, META, loadConfig, resolveProvider, embedTexts, readVectors, readJsonSafe } from './embed.mjs';
+import { CATALOG, META, CATALOG_SCHEMA_VERSION, loadConfig, resolveProvider, embedTexts, readVectors, readJsonSafe, withCatalogMetadata } from './embed.mjs';
 
 const BUILD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'build-index.mjs');
 
@@ -35,7 +35,7 @@ const taskText = opt('task');
 const getNames = opt('get');
 
 if (!allQuery && !getNames) {
-    console.error('使い方: --all "<keywords>" [--task "<原文>"] / --get "<names>"');
+    console.error('使い方: --all "<keywords>" [--task "<原文>"] / --get "<kind:name,...>"');
     process.exit(1);
 }
 
@@ -57,17 +57,40 @@ if (!fs.existsSync(CATALOG)) {
 function isStale() {
     const meta = readJsonSafe(META);
     if (!meta) return true;
+    if (meta.schemaVersion !== CATALOG_SCHEMA_VERSION) return true;
     return Date.now() - Date.parse(meta.builtAt) > 7 * 24 * 60 * 60 * 1000;
 }
 
-const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const docs = fs.readFileSync(CATALOG, 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+    try { return [withCatalogMetadata(JSON.parse(l))]; } catch { return []; }
+});
 
-// --- --get: 名前完全一致で詳細を返す(採用候補のみに使う想定) ---
+// --- --get: 一意な id で詳細を返す(採用候補のみに使う想定) ---
+// 旧カタログのために名前指定も維持するが、同名の異なる kind がある場合は曖昧な名前を
+// 勝手に展開せず、--all が返す kind:name 形式の id を使うよう明示する。
 if (getNames) {
-    const wanted = new Set(getNames.split(',').map((s) => s.trim().toLowerCase()));
+    const requested = [...new Set(getNames.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean))];
+    const recordId = (d) => String(d.id || `${d.kind}:${d.name}`).toLowerCase();
+    const byId = new Map(docs.map((d) => [recordId(d), d]));
+    const byName = new Map();
+    for (const d of docs) {
+        const name = String(d.name).toLowerCase();
+        if (!byName.has(name)) byName.set(name, []);
+        byName.get(name).push(d);
+    }
+    const selected = new Set();
+    for (const value of requested) {
+        if (byId.has(value)) {
+            selected.add(byId.get(value));
+            continue;
+        }
+        const matches = byName.get(value) || [];
+        if (matches.length === 1) selected.add(matches[0]);
+        else if (matches.length > 1) console.error(`曖昧な名前 ${value}: ${matches.map(recordId).join(', ')}。--get には id を指定してください。`);
+    }
     for (const d of docs) {
         // fulltext は検索語彙専用。出力するとトークン節約が台無しになるため必ず落とす
-        if (wanted.has(String(d.name).toLowerCase())) {
+        if (selected.has(d)) {
             const { fulltext, ...rest } = d;
             console.log(JSON.stringify(rest));
         }
@@ -103,6 +126,11 @@ const fields = docs.map((d) => ({
     name: new Set(tokenize(d.name)),
     desc: new Set(tokenize(d.description)),
     tags: new Set(tokenize((d.tags || []).join(' '))),
+    // availability/packaging と execution などは tags と別の分類軸。
+    // 新しい機能種別を名前に依存せず検索できるよう、同じ重みの facet として索引化する。
+    // unknown は検索ノイズになるので索引から外す。
+    facets: new Set(tokenize([d.domain, d.availability, d.packaging, d.execution]
+        .filter((value) => value && value !== 'unknown').join(' '))),
     // fulltext: SKILL.md やエージェント定義の本文(あるソースのみ)。
     // 説明文に現れない語彙(具体的なAPI名・ファイル形式等)での取りこぼしを防ぐ
     body: new Set(tokenize(d.fulltext || '')),
@@ -110,7 +138,7 @@ const fields = docs.map((d) => ({
 for (const f of fields) {
     // 4フィールド合成の使い捨て Set を作らず、seen ガードで1文書1カウントにする
     const seen = new Set();
-    for (const set of [f.name, f.desc, f.tags, f.body]) {
+    for (const set of [f.name, f.desc, f.tags, f.facets, f.body]) {
         for (const t of set) {
             if (!seen.has(t)) { seen.add(t); df.set(t, (df.get(t) || 0) + 1); }
         }
@@ -128,6 +156,7 @@ let scored = docs.map((d, i) => {
     for (const t of qTokens) {
         if (fields[i].name.has(t)) { score += 3 * idf(t); matches.push(`${t}:name`); }
         else if (fields[i].tags.has(t)) { score += 2 * idf(t); matches.push(`${t}:tag`); }
+        else if (fields[i].facets.has(t)) { score += 2 * idf(t); matches.push(`${t}:facet`); }
         else if (fields[i].desc.has(t)) { score += idf(t); matches.push(`${t}:description`); }
         else if (fields[i].body.has(t)) { score += 0.5 * idf(t); matches.push(`${t}:body`); }
     }
@@ -187,7 +216,18 @@ if (vec) {
 // LLM の自己申告に頼らないことが透明性の担保になる
 
 // 既知種別の表示上限。カタログ側に新しい kind が増えても自動で表示対象になる(既定5件)
-const CAPS = { agent: 5, plugin: 5, skill: 6, mcp: 5 };
+const CAPS = {
+    builtin: 3,
+    context: 4,
+    plugin: 5,
+    skill: 6,
+    agent: 5,
+    hook: 5,
+    lsp: 5,
+    monitor: 3,
+    'output-style': 3,
+    mcp: 5,
+};
 const byKind = new Map();
 for (const r of scored) {
     if (!byKind.has(r.d.kind)) byKind.set(r.d.kind, []);
@@ -201,17 +241,17 @@ let totalStr = '';
 const metaForTrace = readJsonSafe(META);
 if (metaForTrace) {
     builtAt = metaForTrace.builtAt;
-    totalStr = ` ${metaForTrace.total}件(` + Object.entries(metaForTrace.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
+    totalStr = ` schema=${metaForTrace.schemaVersion || '?'} ${metaForTrace.total}件(` + Object.entries(metaForTrace.counts).map(([k, v]) => `${k} ${v}`).join(' / ') + ')';
 }
 console.log(`# catalog: ${builtAt} 構築,${totalStr}`);
 console.log(`# mode: ${searchMode}`);
 console.log(`# query: keywords[${kwTokens.join(' ')}]` + (taskTokens.length ? ` + 原文由来[${taskTokens.join(' ')}]` : ' (原文由来の追加トークンなし)'));
 console.log(`# hits: ${kinds.map((k) => `${k} ${(byKind.get(k) || []).length}`).join(' / ')} → 表示 ${kinds.map((k) => `${k} ${Math.min(CAPS[k] ?? 5, (byKind.get(k) || []).length)}`).join(' / ')}`);
-console.log('kind\tname\tsource\tmatched_fields\tdescription');
+console.log('id\tkind\tname\tsource\tmatched_fields\tdescription');
 for (const kind of kinds) {
     for (const r of (byKind.get(kind) || []).slice(0, CAPS[kind] ?? 5)) {
         const d = r.d;
         const desc = (d.description || '').replace(/[\t\n]/g, ' ').slice(0, 90);
-        console.log(`${d.kind}\t${d.name}\t${d.source}\t${(r.matches || []).join(',')}\t${desc}`);
+        console.log(`${d.id || `${d.kind}:${d.name}`}\t${d.kind}\t${d.name}\t${d.source}\t${(r.matches || []).join(',')}\t${desc}`);
     }
 }

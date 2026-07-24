@@ -25,10 +25,12 @@ const apply = process.argv.includes('--apply');
 
 // --- 導入済みエージェントの一覧(frontmatter の name とファイル名の両方で照合する) ---
 const installed = [];
-for (const f of fs.readdirSync(AGENTS_DIR)) {
-    if (!f.endsWith('.md')) continue;
-    const fm = parseFrontmatter(fs.readFileSync(path.join(AGENTS_DIR, f), 'utf8'));
-    installed.push({ file: f, base: f.replace(/\.md$/, ''), name: fm.name || f.replace(/\.md$/, ''), fmLen: fm.fmLen });
+if (fs.existsSync(AGENTS_DIR)) {
+    for (const f of fs.readdirSync(AGENTS_DIR)) {
+        if (!f.endsWith('.md')) continue;
+        const fm = parseFrontmatter(fs.readFileSync(path.join(AGENTS_DIR, f), 'utf8'));
+        installed.push({ file: f, base: f.replace(/\.md$/, ''), name: fm.name || f.replace(/\.md$/, ''), fmLen: fm.fmLen });
+    }
 }
 
 // --- 全セッション履歴から使用実績を収集 ---
@@ -36,7 +38,7 @@ for (const f of fs.readdirSync(AGENTS_DIR)) {
 // (ファイルが数百MBでもストリームで1パス)
 async function collectUsedNames() {
     const used = new Set();
-    if (!fs.existsSync(PROJECTS_DIR)) return used;
+    if (!fs.existsSync(PROJECTS_DIR)) return { used, sessionFilesScanned: 0 };
     const files = [];
     (function walk(dir) {
         for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -55,13 +57,15 @@ async function collectUsedNames() {
             for (const m of line.matchAll(/"subagent_type"\s*:\s*"([^"]+)"/g)) used.add(m[1]);
         }
     }
-    return used;
+    return { used, sessionFilesScanned: files.length };
 }
 
-const used = await collectUsedNames();
+const { used, sessionFilesScanned } = await collectUsedNames();
 const isUsed = (a) => used.has(a.name) || used.has(a.base);
 const unused = installed.filter((a) => !isUsed(a));
 const usedList = installed.filter(isUsed);
+// Refuse to archive on a false "unused" read caused by having no transcripts to check at all.
+const canArchive = sessionFilesScanned > 0;
 
 // 常駐税の概算: エージェント一覧には name+description が載る ≒ frontmatter 長 / 4 トークン。
 // 毎セッションの全 API コールにキャッシュ経由でも負荷がかかるため「セッションあたり」で示す
@@ -69,13 +73,18 @@ const taxTokens = Math.round(unused.reduce((s, a) => s + a.fmLen, 0) / 4);
 
 console.log(JSON.stringify({
     installed: installed.length,
+    sessionFilesScanned,
     used: usedList.map((a) => a.name),
     unusedCount: unused.length,
     estimatedTaxTokensPerSession: taxTokens,
     mode: apply ? 'apply' : 'dry-run',
+    archiveAllowed: canArchive,
 }, null, 2));
 
-if (apply && unused.length > 0) {
+if (apply && !canArchive) {
+    console.error('Claude Code のセッション履歴が見つからないため、使用状況を安全に判定できず退避を中止しました。');
+    process.exitCode = 2;
+} else if (apply && unused.length > 0) {
     fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
     let archived = 0;
     for (const a of unused) {
